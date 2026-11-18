@@ -18,7 +18,7 @@ type FakeFoundation struct {
 	bindRunningReturnsOnCall map[int]struct {
 		result1 error
 	}
-	CreateGroupStub        func(context.Context, string, []asgsync.Rule) (string, error)
+	CreateGroupStub        func(context.Context, string, []asgsync.Rule, asgsync.RuleDescriptions) (string, error)
 	createGroupMutex       sync.RWMutex
 	createGroupArgsForCall []FakeFoundationCreateGroupArgs
 	createGroupReturns     struct {
@@ -80,6 +80,15 @@ type FakeFoundation struct {
 	unbindRunningReturnsOnCall map[int]struct {
 		result1 error
 	}
+	UpdateGroupDescriptionsStub        func(context.Context, string, []asgsync.Rule, asgsync.RuleDescriptions) error
+	updateGroupDescriptionsMutex       sync.RWMutex
+	updateGroupDescriptionsArgsForCall []FakeFoundationUpdateGroupDescriptionsArgs
+	updateGroupDescriptionsReturns     struct {
+		result1 error
+	}
+	updateGroupDescriptionsReturnsOnCall map[int]struct {
+		result1 error
+	}
 	invocations      map[string][][]interface{}
 	callOrder        []string
 	invocationsMutex sync.RWMutex
@@ -97,6 +106,7 @@ type FakeFoundationCreateGroupArgs struct {
 	Arg1 context.Context
 	Arg2 string
 	Arg3 []asgsync.Rule
+	Arg4 asgsync.RuleDescriptions
 }
 
 // FakeFoundationDeleteGroupArgs holds the arguments of one call to DeleteGroup.
@@ -127,6 +137,14 @@ type FakeFoundationUnbindRunningArgs struct {
 	Arg1 context.Context
 	Arg2 string
 	Arg3 string
+}
+
+// FakeFoundationUpdateGroupDescriptionsArgs holds the arguments of one call to UpdateGroupDescriptions.
+type FakeFoundationUpdateGroupDescriptionsArgs struct {
+	Arg1 context.Context
+	Arg2 string
+	Arg3 []asgsync.Rule
+	Arg4 asgsync.RuleDescriptions
 }
 
 func (fake *FakeFoundation) BindRunning(arg1 context.Context, arg2 string, arg3 []string) error {
@@ -201,7 +219,7 @@ func (fake *FakeFoundation) BindRunningReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
-func (fake *FakeFoundation) CreateGroup(arg1 context.Context, arg2 string, arg3 []asgsync.Rule) (string, error) {
+func (fake *FakeFoundation) CreateGroup(arg1 context.Context, arg2 string, arg3 []asgsync.Rule, arg4 asgsync.RuleDescriptions) (string, error) {
 	var arg3Copy []asgsync.Rule
 	if arg3 != nil {
 		arg3Copy = make([]asgsync.Rule, len(arg3))
@@ -209,13 +227,13 @@ func (fake *FakeFoundation) CreateGroup(arg1 context.Context, arg2 string, arg3 
 	}
 	fake.createGroupMutex.Lock()
 	ret, specificReturn := fake.createGroupReturnsOnCall[len(fake.createGroupArgsForCall)]
-	fake.createGroupArgsForCall = append(fake.createGroupArgsForCall, FakeFoundationCreateGroupArgs{arg1, arg2, arg3Copy})
+	fake.createGroupArgsForCall = append(fake.createGroupArgsForCall, FakeFoundationCreateGroupArgs{arg1, arg2, arg3Copy, arg4})
 	stub := fake.CreateGroupStub
 	fakeReturns := fake.createGroupReturns
-	fake.recordInvocation("CreateGroup", []interface{}{arg1, arg2, arg3Copy})
+	fake.recordInvocation("CreateGroup", []interface{}{arg1, arg2, arg3Copy, arg4})
 	fake.createGroupMutex.Unlock()
 	if stub != nil {
-		return stub(arg1, arg2, arg3)
+		return stub(arg1, arg2, arg3, arg4)
 	}
 	if specificReturn {
 		return ret.result1, ret.result2
@@ -229,17 +247,17 @@ func (fake *FakeFoundation) CreateGroupCallCount() int {
 	return len(fake.createGroupArgsForCall)
 }
 
-func (fake *FakeFoundation) CreateGroupCalls(stub func(context.Context, string, []asgsync.Rule) (string, error)) {
+func (fake *FakeFoundation) CreateGroupCalls(stub func(context.Context, string, []asgsync.Rule, asgsync.RuleDescriptions) (string, error)) {
 	fake.createGroupMutex.Lock()
 	defer fake.createGroupMutex.Unlock()
 	fake.CreateGroupStub = stub
 }
 
-func (fake *FakeFoundation) CreateGroupArgsForCall(i int) (context.Context, string, []asgsync.Rule) {
+func (fake *FakeFoundation) CreateGroupArgsForCall(i int) (context.Context, string, []asgsync.Rule, asgsync.RuleDescriptions) {
 	fake.createGroupMutex.RLock()
 	defer fake.createGroupMutex.RUnlock()
 	argsForCall := fake.createGroupArgsForCall[i]
-	return argsForCall.Arg1, argsForCall.Arg2, argsForCall.Arg3
+	return argsForCall.Arg1, argsForCall.Arg2, argsForCall.Arg3, argsForCall.Arg4
 }
 
 func (fake *FakeFoundation) CreateGroupArgs() []FakeFoundationCreateGroupArgs {
@@ -616,6 +634,78 @@ func (fake *FakeFoundation) UnbindRunningReturnsOnCall(i int, result1 error) {
 		})
 	}
 	fake.unbindRunningReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeFoundation) UpdateGroupDescriptions(arg1 context.Context, arg2 string, arg3 []asgsync.Rule, arg4 asgsync.RuleDescriptions) error {
+	var arg3Copy []asgsync.Rule
+	if arg3 != nil {
+		arg3Copy = make([]asgsync.Rule, len(arg3))
+		copy(arg3Copy, arg3)
+	}
+	fake.updateGroupDescriptionsMutex.Lock()
+	ret, specificReturn := fake.updateGroupDescriptionsReturnsOnCall[len(fake.updateGroupDescriptionsArgsForCall)]
+	fake.updateGroupDescriptionsArgsForCall = append(fake.updateGroupDescriptionsArgsForCall, FakeFoundationUpdateGroupDescriptionsArgs{arg1, arg2, arg3Copy, arg4})
+	stub := fake.UpdateGroupDescriptionsStub
+	fakeReturns := fake.updateGroupDescriptionsReturns
+	fake.recordInvocation("UpdateGroupDescriptions", []interface{}{arg1, arg2, arg3Copy, arg4})
+	fake.updateGroupDescriptionsMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3, arg4)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeFoundation) UpdateGroupDescriptionsCallCount() int {
+	fake.updateGroupDescriptionsMutex.RLock()
+	defer fake.updateGroupDescriptionsMutex.RUnlock()
+	return len(fake.updateGroupDescriptionsArgsForCall)
+}
+
+func (fake *FakeFoundation) UpdateGroupDescriptionsCalls(stub func(context.Context, string, []asgsync.Rule, asgsync.RuleDescriptions) error) {
+	fake.updateGroupDescriptionsMutex.Lock()
+	defer fake.updateGroupDescriptionsMutex.Unlock()
+	fake.UpdateGroupDescriptionsStub = stub
+}
+
+func (fake *FakeFoundation) UpdateGroupDescriptionsArgsForCall(i int) (context.Context, string, []asgsync.Rule, asgsync.RuleDescriptions) {
+	fake.updateGroupDescriptionsMutex.RLock()
+	defer fake.updateGroupDescriptionsMutex.RUnlock()
+	argsForCall := fake.updateGroupDescriptionsArgsForCall[i]
+	return argsForCall.Arg1, argsForCall.Arg2, argsForCall.Arg3, argsForCall.Arg4
+}
+
+func (fake *FakeFoundation) UpdateGroupDescriptionsArgs() []FakeFoundationUpdateGroupDescriptionsArgs {
+	fake.updateGroupDescriptionsMutex.RLock()
+	defer fake.updateGroupDescriptionsMutex.RUnlock()
+	args := make([]FakeFoundationUpdateGroupDescriptionsArgs, len(fake.updateGroupDescriptionsArgsForCall))
+	copy(args, fake.updateGroupDescriptionsArgsForCall)
+	return args
+}
+
+func (fake *FakeFoundation) UpdateGroupDescriptionsReturns(result1 error) {
+	fake.updateGroupDescriptionsMutex.Lock()
+	defer fake.updateGroupDescriptionsMutex.Unlock()
+	fake.UpdateGroupDescriptionsStub = nil
+	fake.updateGroupDescriptionsReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeFoundation) UpdateGroupDescriptionsReturnsOnCall(i int, result1 error) {
+	fake.updateGroupDescriptionsMutex.Lock()
+	defer fake.updateGroupDescriptionsMutex.Unlock()
+	fake.UpdateGroupDescriptionsStub = nil
+	if fake.updateGroupDescriptionsReturnsOnCall == nil {
+		fake.updateGroupDescriptionsReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.updateGroupDescriptionsReturnsOnCall[i] = struct {
 		result1 error
 	}{result1}
 }

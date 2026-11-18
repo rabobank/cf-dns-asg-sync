@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
+	"net/netip"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -23,9 +25,9 @@ var _ = Describe("ASG reconciliation", func() {
 		cf.FindOrgReturns("payments-guid", nil)
 		cf.ListSpacesReturns([]sync.Space{{Name: "dev", GUID: "dev-guid"}, {Name: "prod", GUID: "prod-guid"}}, nil)
 		cf.ListGroupsCalls(func(context.Context) ([]sync.SecurityGroup, error) { return existing, nil })
-		cf.CreateGroupCalls(func(_ context.Context, name string, rules []sync.Rule) (string, error) {
+		cf.CreateGroupCalls(func(_ context.Context, name string, rules []sync.Rule, descriptions sync.RuleDescriptions) (string, error) {
 			id := fmt.Sprintf("group-%d", len(existing)+1)
-			existing = append(existing, sync.SecurityGroup{GUID: id, Name: name, Rules: append([]sync.Rule(nil), rules...)})
+			existing = append(existing, sync.SecurityGroup{GUID: id, Name: name, Rules: append([]sync.Rule(nil), rules...), Descriptions: descriptions})
 			return id, nil
 		})
 		cf.BindRunningCalls(func(_ context.Context, id string, guids []string) error {
@@ -87,6 +89,47 @@ var _ = Describe("ASG reconciliation", func() {
 		Expect(cf.CreateGroupCallCount()).To(BeZero())
 	})
 
+	It("backfills descriptions on existing ASGs without changing their grants or bindings", func(ctx SpecContext) {
+		Expect(sync.Reconcile(ctx, cf, []sync.ResolvedOrg{org}, false, io.Discard)).To(Succeed())
+		org.Descriptions = sync.RuleDescriptions{org.Baseline[0]: "a.example.org,b.example.org"}
+		Expect(sync.Reconcile(ctx, cf, []sync.ResolvedOrg{org}, true, io.Discard)).To(Succeed())
+		Expect(cf.UpdateGroupDescriptionsCallCount()).To(BeZero())
+		cf.UpdateGroupDescriptionsCalls(func(_ context.Context, id string, rules []sync.Rule, descriptions sync.RuleDescriptions) error {
+			Expect(id).To(Equal(existing[0].GUID))
+			Expect(rules).To(Equal(existing[0].Rules))
+			existing[0].Descriptions = descriptions
+			return nil
+		})
+		Expect(sync.Reconcile(ctx, cf, []sync.ResolvedOrg{org}, false, io.Discard)).To(Succeed())
+		Expect(sync.Reconcile(ctx, cf, []sync.ResolvedOrg{org}, false, io.Discard)).To(Succeed())
+		Expect(cf.UpdateGroupDescriptionsCallCount()).To(Equal(1))
+		Expect(existing[0].Descriptions).To(Equal(org.Descriptions))
+		Expect(cf.CreateGroupCallCount()).To(Equal(1))
+		Expect(cf.BindRunningCallCount()).To(Equal(1))
+		Expect(cf.UnbindRunningCallCount()).To(BeZero())
+		Expect(cf.DeleteGroupCallCount()).To(BeZero())
+	})
+
+	It("does not grant access from a first-run empty answer and applies rules once DNS recovers", func(ctx SpecContext) {
+		policy, err := sync.ParsePolicy(strings.NewReader(`orgs: [{name: payments, allow: [{hostname: payments.example.org, protocol: tcp, ports: [443]}]}]`))
+		Expect(err).NotTo(HaveOccurred())
+		resolver := &asgsyncfakes.FakeResolver{}
+		orgs, err := sync.Resolve(ctx, policy, resolver, sync.DNSOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sync.Reconcile(ctx, cf, orgs, false, io.Discard)).To(MatchError(ContainSubstring("no previously applied IPs recorded")))
+		Expect(cf.CreateGroupCallCount()).To(BeZero())
+		Expect(cf.BindRunningCallCount()).To(BeZero())
+		Expect(cf.UpdateGroupDescriptionsCallCount()).To(BeZero())
+		Expect(cf.UnbindRunningCallCount()).To(BeZero())
+		Expect(cf.DeleteGroupCallCount()).To(BeZero())
+		resolver.LookupNetIPReturns([]netip.Addr{netip.MustParseAddr("192.0.2.1")}, nil)
+		orgs, err = sync.Resolve(ctx, policy, resolver, sync.DNSOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sync.Reconcile(ctx, cf, orgs, false, io.Discard)).To(Succeed())
+		Expect(existing).To(HaveLen(1))
+		Expect(existing[0].Descriptions).To(Equal(sync.RuleDescriptions{org.Baseline[0]: "payments.example.org"}))
+	})
+
 	It("binds rotated grants before revoking old grants and recovers an interrupted create", func(ctx SpecContext) {
 		Expect(sync.Reconcile(ctx, cf, []sync.ResolvedOrg{org}, false, io.Discard)).To(Succeed())
 		org.Baseline[0].Destination = "192.0.2.2"
@@ -111,4 +154,53 @@ var _ = Describe("ASG reconciliation", func() {
 		Expect(cf.UnbindRunningCallCount()).To(Equal(2))
 		Expect(cf.DeleteGroupCallCount()).To(Equal(1))
 	})
+
+	DescribeTable("retains an affected org on DNS failure and still syncs healthy orgs",
+		func(ctx SpecContext, lookupErr error, problem string) {
+			cf.FindOrgCalls(func(_ context.Context, name string) (string, error) { return name + "-guid", nil })
+			cf.ListSpacesCalls(func(_ context.Context, org string) ([]sync.Space, error) {
+				return []sync.Space{{Name: "dev", GUID: org + "-dev"}}, nil
+			})
+			policy, err := sync.ParsePolicy(strings.NewReader(`orgs:
+  - name: payments
+    allow: [{hostname: payments.example.org, protocol: tcp, ports: [443]}]
+  - name: reporting
+    allow: [{hostname: reports.example.org, protocol: tcp, ports: [443]}]
+`))
+			Expect(err).NotTo(HaveOccurred())
+			resolver := &asgsyncfakes.FakeResolver{}
+			resolver.LookupNetIPCalls(func(_ context.Context, _, host string) ([]netip.Addr, error) {
+				if host == "payments.example.org." {
+					return []netip.Addr{netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2")}, nil
+				}
+				return []netip.Addr{netip.MustParseAddr("192.0.2.3")}, nil
+			})
+			orgs, err := sync.Resolve(ctx, policy, resolver, sync.DNSOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(sync.Reconcile(ctx, cf, orgs[:1], false, io.Discard)).To(Succeed())
+
+			resolver.LookupNetIPCalls(func(_ context.Context, _, host string) ([]netip.Addr, error) {
+				if host == "payments.example.org." {
+					return nil, lookupErr
+				}
+				return []netip.Addr{netip.MustParseAddr("192.0.2.3")}, nil
+			})
+			orgs, err = sync.Resolve(ctx, policy, resolver, sync.DNSOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(sync.Reconcile(ctx, cf, orgs, false, io.Discard)).To(MatchError(And(
+				ContainSubstring("payments.example.org"), ContainSubstring(problem),
+				ContainSubstring("2 previously applied IPs"), ContainSubstring("192.0.2.1,192.0.2.2"),
+			)))
+			Expect(existing).To(HaveLen(2))
+			Expect(existing[0].Running).To(Equal([]string{"payments-guid-dev"}))
+			Expect(existing[1].Running).To(Equal([]string{"reporting-guid-dev"}))
+			Expect(cf.UnbindRunningCallCount()).To(BeZero())
+			Expect(cf.DeleteGroupCallCount()).To(BeZero())
+			Expect(cf.UpdateGroupDescriptionsCallCount()).To(BeZero())
+		},
+		Entry("empty answer", nil, "no usable addresses"),
+		Entry("timeout", &net.DNSError{Err: "i/o timeout", IsTimeout: true}, "timeout"),
+		Entry("SERVFAIL", &net.DNSError{Err: "server misbehaving", IsTemporary: true}, "server misbehaving"),
+		Entry("NXDOMAIN", &net.DNSError{Err: "no such host", IsNotFound: true}, "no such host"),
+	)
 })

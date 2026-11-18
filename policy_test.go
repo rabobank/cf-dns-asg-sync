@@ -53,6 +53,34 @@ var _ = Describe("DNS policy", func() {
 		Expect(err).NotTo(HaveOccurred())
 	})
 
+	It("records both hostnames for a shared grant and caches shared failures across orgs", func(ctx SpecContext) {
+		policy, err := sync.ParsePolicy(strings.NewReader(`orgs:
+  - name: payments
+    allow:
+      - {hostname: z.example.org, protocol: tcp, ports: [443]}
+      - {hostname: a.example.org, protocol: tcp, ports: [443, 8443]}
+  - name: reporting
+    allow: [{hostname: a.example.org, protocol: tcp, ports: [8443]}]
+`))
+		Expect(err).NotTo(HaveOccurred())
+		resolver.LookupNetIPReturns([]netip.Addr{netip.MustParseAddr("192.0.2.1")}, nil)
+		orgs, err := sync.Resolve(ctx, policy, resolver, sync.DNSOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(orgs[0].Baseline).To(HaveLen(2))
+		Expect(orgs[0].Descriptions).To(Equal(sync.RuleDescriptions{
+			{Destination: "192.0.2.1", Protocol: "tcp", Port: 443}:  "a.example.org,z.example.org",
+			{Destination: "192.0.2.1", Protocol: "tcp", Port: 8443}: "a.example.org",
+		}))
+		resolver.LookupNetIPReturns(nil, nil)
+		orgs, err = sync.Resolve(ctx, policy, resolver, sync.DNSOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resolver.LookupNetIPCallCount()).To(Equal(4))
+		for _, org := range orgs {
+			Expect(org.DNSFailures).To(HaveKey("a.example.org."))
+			Expect(org.Baseline).To(BeEmpty())
+		}
+	})
+
 	DescribeTable("rejects invalid YAML before resolving names",
 		func(yaml string) {
 			_, err := sync.ParsePolicy(strings.NewReader(yaml))

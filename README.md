@@ -25,8 +25,17 @@ destinations. Loopback and link-local addresses are never permitted.
 ## Reconciliation
 
 - The utility computes the **minimum** number of managed ASGs for each org's
-  current spaces. If DNS fails, a configured space is missing, or the solver
-  reaches its budget, it reports an error before writing.
+  current spaces. A missing configured space or exhausted solver budget aborts
+  before writing.
+- A DNS error or empty answer leaves the affected org's existing ASGs and space
+  bindings intact. Healthy orgs can still sync, and the command exits nonzero so
+  Concourse reports the failure. A first-run failure adds no grants.
+- Each managed rule's `description` stores the sorted, comma-separated names
+  that produced its grant (destination IP, protocol, and port). Names sharing a
+  grant are deduplicated; descriptions do not affect ASG minimization. On a DNS
+  failure, the utility reports any previously applied IPs it can find in the
+  org's currently bound managed ASGs. This records the applied rules, not a
+  time series of DNS answers. Older ASGs get descriptions on a successful sync.
 - Managed ASGs have content-addressed names under the reserved
   `cf-dns-asg-sync-` prefix. Do not edit or bind these groups manually. An ASG that
   is global or bound outside its owning org blocks reconciliation. Other groups

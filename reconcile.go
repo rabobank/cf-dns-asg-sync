@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 )
@@ -16,7 +18,8 @@ type Foundation interface {
 	FindOrg(context.Context, string) (string, error)
 	ListSpaces(context.Context, string) ([]Space, error)
 	ListGroups(context.Context) ([]SecurityGroup, error)
-	CreateGroup(context.Context, string, []Rule) (string, error)
+	CreateGroup(context.Context, string, []Rule, RuleDescriptions) (string, error)
+	UpdateGroupDescriptions(context.Context, string, []Rule, RuleDescriptions) error
 	BindRunning(context.Context, string, []string) error
 	UnbindRunning(context.Context, string, string) error
 	DeleteGroup(context.Context, string) error
@@ -28,6 +31,7 @@ type SecurityGroup struct {
 	Global           bool
 	Unsupported      bool
 	Rules            []Rule
+	Descriptions     RuleDescriptions
 	Running, Staging []string
 }
 
@@ -37,6 +41,8 @@ type targetGroup struct {
 	name         string
 	org          string
 	rules        []Rule
+	descriptions RuleDescriptions
+	update       bool
 	current      SecurityGroup
 	bind, unbind []Space
 	retire       bool
@@ -57,18 +63,79 @@ func Reconcile(ctx context.Context, cf Foundation, orgs []ResolvedOrg, dryRun bo
 		return fmt.Errorf("list ASGs: %w", err)
 	}
 	var actions []targetGroup
+	var failures []error
 	for _, org := range orgs {
+		if len(org.DNSFailures) > 0 {
+			failures = append(failures, describeDNSFailures(ctx, cf, org, groups))
+			continue
+		}
 		plan, err := planOrg(ctx, cf, org, groups)
 		if err != nil {
-			return fmt.Errorf("org %q: %w", org.Name, err)
+			return errors.Join(errors.Join(failures...), fmt.Errorf("org %q: %w", org.Name, err))
 		}
 		actions = append(actions, plan...)
 	}
+	dnsErr := errors.Join(failures...)
+	return errors.Join(dnsErr, applyActions(ctx, cf, actions, dryRun, out, dnsErr != nil))
+}
+
+func describeDNSFailures(ctx context.Context, cf Foundation, org ResolvedOrg, groups []SecurityGroup) error {
+	guid, err := cf.FindOrg(ctx, org.Name)
+	if guid == "" && err == nil {
+		err = errors.New("empty org GUID")
+	}
+	var spaces []Space
+	if err == nil {
+		spaces, err = cf.ListSpaces(ctx, guid)
+	}
+	inOrg := map[string]bool{}
+	for _, space := range spaces {
+		inOrg[space.GUID] = true
+	}
+	previous := map[string][]string{}
+	var diagnostics []error
+	if err != nil {
+		diagnostics = append(diagnostics, fmt.Errorf("org %q: could not read DNS history: %w", org.Name, err))
+	} else {
+		prefix := orgPrefix(guid)
+		for _, g := range groups {
+			if !managedName(g.Name, prefix) || g.Global || g.Unsupported || len(g.Running) == 0 || len(g.Staging) != 0 || g.Name != prefix+ruleKey(g.Rules) || slices.ContainsFunc(g.Running, func(id string) bool { return !inOrg[id] }) {
+				continue
+			}
+			for _, rule := range g.Rules {
+				for _, host := range strings.Split(g.Descriptions[rule], ",") {
+					if _, failed := org.DNSFailures[host+"."]; failed {
+						previous[host+"."] = append(previous[host+"."], rule.Destination)
+					}
+				}
+			}
+		}
+	}
+	for _, host := range slices.Sorted(maps.Keys(org.DNSFailures)) {
+		ips := sortedUnique(previous[host])
+		history := "no previously applied IPs recorded"
+		if len(ips) > 0 {
+			history = fmt.Sprintf("%d previously applied IPs: %s", len(ips), strings.Join(ips, ","))
+		}
+		diagnostics = append(diagnostics, fmt.Errorf("org %q: DNS lookup for %s failed: %w; existing ASGs retained (%s)", org.Name, host, org.DNSFailures[host], history))
+	}
+	return errors.Join(diagnostics...)
+}
+
+func applyActions(ctx context.Context, cf Foundation, actions []targetGroup, dryRun bool, out io.Writer, skipped bool) error {
 	if len(actions) == 0 {
+		if skipped {
+			return nil
+		}
 		_, err := fmt.Fprintln(out, "ASGs already up to date")
 		return err
 	}
 	for _, a := range actions {
+		if a.update {
+			if _, err := fmt.Fprintf(out, "%s update DNS descriptions for ASG %s\n", a.org, a.name); err != nil {
+				return err
+			}
+		}
 		if a.current.GUID == "" || a.retire {
 			verb := "create"
 			if a.retire {
@@ -102,12 +169,18 @@ func Reconcile(ctx context.Context, cf Foundation, orgs []ResolvedOrg, dryRun bo
 	for _, a := range actions {
 		id := a.current.GUID
 		if id == "" {
-			id, err = cf.CreateGroup(ctx, a.name, a.rules)
+			var err error
+			id, err = cf.CreateGroup(ctx, a.name, a.rules, a.descriptions)
 			if err != nil {
 				return fmt.Errorf("create %s: %w", a.name, err)
 			}
 			if id == "" {
 				return fmt.Errorf("create %s: empty ASG GUID", a.name)
+			}
+		}
+		if a.update {
+			if err := cf.UpdateGroupDescriptions(ctx, id, a.rules, a.descriptions); err != nil {
+				return fmt.Errorf("update descriptions for %s: %w", a.name, err)
 			}
 		}
 		if len(a.bind) > 0 {
@@ -169,11 +242,7 @@ func planOrg(ctx context.Context, cf Foundation, org ResolvedOrg, groups []Secur
 	ordered := slices.Clone(groups)
 	slices.SortFunc(ordered, func(a, b SecurityGroup) int { return strings.Compare(a.Name, b.Name) })
 	for _, g := range ordered {
-		suffix, ok := strings.CutPrefix(g.Name, prefix)
-		if !ok || len(suffix) != 64 {
-			continue
-		}
-		if _, err := hex.DecodeString(suffix); err != nil {
+		if !managedName(g.Name, prefix) {
 			continue
 		}
 		if g.Global {
@@ -187,7 +256,7 @@ func planOrg(ctx context.Context, cf Foundation, org ResolvedOrg, groups []Secur
 		if len(g.Staging) != 0 {
 			return nil, fmt.Errorf("managed ASG %s has unexpected staging bindings", g.Name)
 		}
-		if g.GUID == "" || managed[g.Name].GUID != "" || g.Unsupported || suffix != ruleKey(g.Rules) {
+		if g.GUID == "" || managed[g.Name].GUID != "" || g.Unsupported || g.Name != prefix+ruleKey(g.Rules) {
 			return nil, fmt.Errorf("managed ASG %s has invalid identity or rules", g.Name)
 		}
 		managed[g.Name] = g
@@ -203,6 +272,13 @@ func planOrg(ctx context.Context, cf Foundation, org ResolvedOrg, groups []Secur
 		current := managed[name]
 		delete(managed, name)
 		a := targetGroup{name: name, org: org.Name, rules: g.Rules, current: current}
+		a.descriptions = RuleDescriptions{}
+		for _, r := range g.Rules {
+			if d := org.Descriptions[r]; d != "" {
+				a.descriptions[r] = d
+			}
+		}
+		a.update = current.GUID != "" && !maps.Equal(a.descriptions, current.Descriptions)
 		for _, id := range g.Spaces {
 			if !slices.Contains(current.Running, id) {
 				a.bind = append(a.bind, byGUID[id])
@@ -213,7 +289,7 @@ func planOrg(ctx context.Context, cf Foundation, org ResolvedOrg, groups []Secur
 				a.unbind = append(a.unbind, byGUID[id])
 			}
 		}
-		if current.GUID == "" || len(a.bind)+len(a.unbind) > 0 {
+		if current.GUID == "" || a.update || len(a.bind)+len(a.unbind) > 0 {
 			actions = append(actions, a)
 		}
 	}
@@ -228,6 +304,15 @@ func planOrg(ctx context.Context, cf Foundation, org ResolvedOrg, groups []Secur
 		actions = append(actions, a)
 	}
 	return actions, nil
+}
+
+func managedName(name, prefix string) bool {
+	suffix, ok := strings.CutPrefix(name, prefix)
+	if !ok || len(suffix) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(suffix)
+	return err == nil
 }
 
 func sortedUnique(values []string) []string {

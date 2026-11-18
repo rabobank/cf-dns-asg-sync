@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -122,7 +123,14 @@ func (c *cloudFoundry) ListGroups(ctx context.Context) ([]SecurityGroup, error) 
 					group.Unsupported = true
 					continue
 				}
-				group.Rules = append(group.Rules, Rule{ip.Unmap().String(), r.Protocol, uint16(port)})
+				rule := Rule{ip.Unmap().String(), r.Protocol, uint16(port)}
+				group.Rules = append(group.Rules, rule)
+				if r.Description != nil && *r.Description != "" {
+					if group.Descriptions == nil {
+						group.Descriptions = RuleDescriptions{}
+					}
+					group.Descriptions[rule] = mergeDescriptions(group.Descriptions[rule], *r.Description)
+				}
 			}
 		}
 		result = append(result, group)
@@ -130,27 +138,41 @@ func (c *cloudFoundry) ListGroups(ctx context.Context) ([]SecurityGroup, error) 
 	return result, nil
 }
 
-func (c *cloudFoundry) CreateGroup(ctx context.Context, name string, rules []Rule) (string, error) {
+func (c *cloudFoundry) CreateGroup(ctx context.Context, name string, rules []Rule, descriptions RuleDescriptions) (string, error) {
 	no := false
-	request := &resource.SecurityGroupCreate{Name: name, GloballyEnabled: &resource.SecurityGroupGloballyEnabled{Running: &no, Staging: &no}}
-	// Consolidate ports for a destination and protocol, while keeping the
-	// planner's unit of comparison a single grant.
-	for _, r := range normalize(append([]Rule(nil), rules...)) {
-		p := strconv.Itoa(int(r.Port))
-		if n := len(request.Rules); n > 0 {
-			last := request.Rules[n-1]
-			if last.Destination == r.Destination && last.Protocol == r.Protocol {
-				*last.Ports += "," + p
-				continue
-			}
-		}
-		request.Rules = append(request.Rules, &resource.SecurityGroupRule{Destination: r.Destination, Protocol: r.Protocol, Ports: &p})
-	}
+	request := &resource.SecurityGroupCreate{Name: name, GloballyEnabled: &resource.SecurityGroupGloballyEnabled{Running: &no, Staging: &no}, Rules: securityGroupRules(rules, descriptions)}
 	g, err := c.client.SecurityGroups.Create(ctx, request)
 	if err != nil {
 		return "", err
 	}
 	return g.GUID, nil
+}
+
+func (c *cloudFoundry) UpdateGroupDescriptions(ctx context.Context, id string, rules []Rule, descriptions RuleDescriptions) error {
+	_, err := c.client.SecurityGroups.Update(ctx, id, &resource.SecurityGroupUpdate{Rules: securityGroupRules(rules, descriptions)})
+	return err
+}
+
+func securityGroupRules(rules []Rule, descriptions RuleDescriptions) []*resource.SecurityGroupRule {
+	type key struct{ destination, protocol, description string }
+	byKey := map[key]*resource.SecurityGroupRule{}
+	var result []*resource.SecurityGroupRule
+	for _, r := range normalize(slices.Clone(rules)) {
+		p := strconv.Itoa(int(r.Port))
+		d := descriptions[r]
+		k := key{r.Destination, r.Protocol, d}
+		if current := byKey[k]; current != nil {
+			*current.Ports += "," + p
+			continue
+		}
+		entry := &resource.SecurityGroupRule{Destination: r.Destination, Protocol: r.Protocol, Ports: &p}
+		if d != "" {
+			entry.Description = &d
+		}
+		byKey[k] = entry
+		result = append(result, entry)
+	}
+	return result
 }
 
 func (c *cloudFoundry) BindRunning(ctx context.Context, group string, spaces []string) error {

@@ -53,10 +53,16 @@ type Rule struct {
 }
 
 type ResolvedOrg struct {
-	Name     string
-	Baseline []Rule
-	Extras   map[string][]Rule
+	Name         string
+	Baseline     []Rule
+	Extras       map[string][]Rule
+	Descriptions RuleDescriptions
+	DNSFailures  map[string]error
 }
+
+// RuleDescriptions records comma-separated source hostnames independently of
+// Rule, whose identity is the actual access it grants.
+type RuleDescriptions map[Rule]string
 
 func (o ResolvedOrg) RulesFor(space string) []Rule {
 	return normalize(append(slices.Clone(o.Baseline), o.Extras[space]...))
@@ -151,11 +157,18 @@ func validateGrants(grants []Grant) error {
 }
 
 func Resolve(ctx context.Context, policy Policy, resolver Resolver, opts DNSOptions) ([]ResolvedOrg, error) {
-	cache := map[string][]netip.Addr{}
-	resolve := func(grants []Grant) ([]Rule, error) {
+	type lookup struct {
+		ips []netip.Addr
+		err error
+	}
+	cache := map[string]lookup{}
+	resolve := func(org *ResolvedOrg, grants []Grant) ([]Rule, error) {
 		var rules []Rule
 		for _, g := range grants {
-			ips, ok := cache[g.Hostname]
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			result, ok := cache[g.Hostname]
 			if !ok {
 				family := "ip4"
 				if opts.IPv6 {
@@ -164,9 +177,13 @@ func Resolve(ctx context.Context, policy Policy, resolver Resolver, opts DNSOpti
 				lookupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 				answers, err := resolver.LookupNetIP(lookupCtx, family, g.Hostname)
 				cancel()
-				if err != nil {
-					return nil, fmt.Errorf("resolve %s: %w", g.Hostname, err)
+				if err := ctx.Err(); err != nil {
+					return nil, err
 				}
+				if err != nil {
+					answers = nil
+				} // Ignore partial answers on failure.
+				result.err = err
 				for _, addr := range answers {
 					addr = addr.Unmap()
 					if addr.Is6() && !opts.IPv6 {
@@ -175,16 +192,23 @@ func Resolve(ctx context.Context, policy Policy, resolver Resolver, opts DNSOpti
 					if !addr.IsGlobalUnicast() || addr.Zone() != "" || (restricted(addr) && !slices.ContainsFunc(opts.PrivateCIDRs, func(p netip.Prefix) bool { return p.Contains(addr) })) {
 						return nil, fmt.Errorf("%s resolved to disallowed address %s", g.Hostname, addr)
 					}
-					ips = append(ips, addr)
+					result.ips = append(result.ips, addr)
 				}
-				if len(ips) == 0 {
-					return nil, fmt.Errorf("%s returned no usable addresses", g.Hostname)
+				if result.err == nil && len(result.ips) == 0 {
+					result.err = errors.New("no usable addresses")
 				}
-				cache[g.Hostname] = ips
+				cache[g.Hostname] = result
 			}
-			for _, ip := range ips {
+			if result.err != nil {
+				org.DNSFailures[g.Hostname] = result.err
+				continue
+			}
+			for _, ip := range result.ips {
 				for _, port := range g.Ports {
-					rules = append(rules, Rule{ip.String(), g.Protocol, port})
+					rule := Rule{ip.String(), g.Protocol, port}
+					rules = append(rules, rule)
+					host := strings.TrimSuffix(g.Hostname, ".")
+					org.Descriptions[rule] = mergeDescriptions(org.Descriptions[rule], host)
 				}
 			}
 		}
@@ -192,21 +216,36 @@ func Resolve(ctx context.Context, policy Policy, resolver Resolver, opts DNSOpti
 	}
 	var orgs []ResolvedOrg
 	for _, o := range policy.Orgs {
-		base, err := resolve(o.Allow)
+		org := ResolvedOrg{Name: o.Name, Extras: map[string][]Rule{}, Descriptions: RuleDescriptions{}, DNSFailures: map[string]error{}}
+		base, err := resolve(&org, o.Allow)
 		if err != nil {
 			return nil, fmt.Errorf("org %q: %w", o.Name, err)
 		}
-		org := ResolvedOrg{o.Name, base, map[string][]Rule{}}
+		org.Baseline = base
 		for _, s := range o.Spaces {
-			rules, err := resolve(s.Allow)
+			rules, err := resolve(&org, s.Allow)
 			if err != nil {
 				return nil, fmt.Errorf("org %q space %q: %w", o.Name, s.Name, err)
 			}
 			org.Extras[s.Name] = rules
 		}
+		if len(org.DNSFailures) > 0 {
+			// No partial policy can be applied for this org.
+			org.Baseline, org.Extras, org.Descriptions = nil, nil, nil
+		}
 		orgs = append(orgs, org)
 	}
 	return orgs, nil
+}
+
+func mergeDescriptions(a, b string) string {
+	if a == "" {
+		return b
+	}
+	if b == "" || a == b {
+		return a
+	}
+	return strings.Join(sortedUnique(strings.Split(a+","+b, ",")), ",")
 }
 
 var carrierGradeNAT = netip.MustParsePrefix("100.64.0.0/10")
