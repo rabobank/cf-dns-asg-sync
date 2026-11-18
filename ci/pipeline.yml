@@ -1,0 +1,40 @@
+resources:
+  - name: source
+    type: git
+    source:
+      uri: ((source_uri))
+      branch: ((source_branch))
+  - name: policy
+    type: git
+    source:
+      uri: ((policy_uri))
+      branch: ((policy_branch))
+  - name: interval
+    type: time
+    source:
+      interval: ((sync_interval))
+
+jobs:
+  - name: test
+    plan:
+      - get: source
+        trigger: true
+      - task: ginkgo
+        file: source/ci/test.yml
+
+  - name: cf-dns-asg-sync
+    serial: true
+    plan:
+      - in_parallel:
+          - get: source
+            passed: [test]
+          - get: policy
+          - get: interval
+            trigger: true
+      - task: sync
+        file: source/ci/sync.yml
+        params:
+          CF_API: ((cf-api))
+          CF_USERNAME: ((cf-client-id))
+          CF_PASSWORD: ((cf-client-secret))
+          DRY_RUN: ((dry_run))

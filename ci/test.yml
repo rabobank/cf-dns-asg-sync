@@ -1,0 +1,25 @@
+platform: linux
+image_resource:
+  type: registry-image
+  source:
+    repository: golang
+    tag: 1.26.8-bookworm
+inputs:
+  - name: source
+outputs:
+  - name: reports
+run:
+  path: sh
+  args:
+    - -ec
+    - |
+      cd source
+      go generate ./...
+      if [ -n "$(git status --porcelain -- asgsyncfakes)" ]; then
+        git status --short -- asgsyncfakes
+        exit 1
+      fi
+      go run github.com/onsi/ginkgo/v2/ginkgo -r -p --randomize-all --randomize-suites \
+        --fail-on-pending --fail-on-empty --keep-going --cover --coverprofile=cover.profile \
+        --race --trace --json-report=report.json --output-dir="$PWD/../reports" \
+        --timeout=5m --poll-progress-after=30s --poll-progress-interval=15s --no-color --force-newlines

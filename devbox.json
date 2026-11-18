@@ -1,0 +1,12 @@
+{
+  "$schema":  "https://raw.githubusercontent.com/jetify-com/devbox/0.17.5/.schema/devbox.schema.json",
+  "packages": ["go@1.26"],
+  "shell": {
+    "init_hook": [
+      "echo 'Welcome to devbox!' > /dev/null"
+    ],
+    "scripts": {
+      "test": "go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --fail-on-empty"
+    }
+  }
+}

@@ -1,0 +1,28 @@
+platform: linux
+image_resource:
+  type: registry-image
+  source:
+    repository: golang
+    tag: 1.26.8-bookworm
+inputs:
+  - name: source
+  - name: policy
+params:
+  CF_API:
+  CF_USERNAME:
+  CF_PASSWORD:
+  DRY_RUN: "true"
+run:
+  path: sh
+  args:
+    - -ec
+    - |
+      cd source
+      set -- --client-credentials --config ../policy/policy.yml
+      case "$DRY_RUN" in
+        true) set -- "$@" --dry-run ;;
+        false) ;;
+        *) printf '%s\n' 'DRY_RUN must be true or false' >&2; exit 1 ;;
+      esac
+      go build -o /tmp/cf-dns-asg-sync ./cmd/cf-dns-asg-sync
+      exec /tmp/cf-dns-asg-sync "$@"
