@@ -15,25 +15,31 @@ import (
 
 //counterfeiter:generate -o asgsyncfakes . Foundation
 type Foundation interface {
+	ListOrgNames(context.Context) ([]string, error)
 	FindOrg(context.Context, string) (string, error)
 	ListSpaces(context.Context, string) ([]Space, error)
 	ListGroups(context.Context) ([]SecurityGroup, error)
+	DisableGlobalGroup(context.Context, string, bool, bool) error
 	CreateGroup(context.Context, string, []Rule, RuleDescriptions) (string, error)
 	UpdateGroupDescriptions(context.Context, string, []Rule, RuleDescriptions) error
 	BindRunning(context.Context, string, []string) error
 	UnbindRunning(context.Context, string, string) error
+	BindStaging(context.Context, string, []string) error
+	UnbindStaging(context.Context, string, string) error
 	DeleteGroup(context.Context, string) error
 }
 
 type Space struct{ Name, GUID string }
 type SecurityGroup struct {
-	GUID, Name       string
-	Global           bool
-	Unsupported      bool
-	Rules            []Rule
-	Descriptions     RuleDescriptions
-	Running, Staging []string
+	GUID, Name                   string
+	GlobalRunning, GlobalStaging bool
+	Unsupported                  bool
+	Rules                        []Rule
+	Descriptions                 RuleDescriptions
+	Running, Staging             []string
 }
+
+func (g SecurityGroup) global() bool { return g.GlobalRunning || g.GlobalStaging }
 
 const namePrefix = "cf-dns-asg-sync-"
 
@@ -44,8 +50,66 @@ type targetGroup struct {
 	descriptions RuleDescriptions
 	update       bool
 	current      SecurityGroup
-	bind, unbind []Space
+	bind, unbind []binding
 	retire       bool
+}
+
+type binding struct {
+	Space
+	lifecycle string
+}
+
+func (b binding) key() string { return b.lifecycle + ":" + b.GUID }
+
+func currentBindings(g SecurityGroup) []string {
+	var result []string
+	for _, id := range g.Running {
+		result = append(result, "running:"+id)
+	}
+	for _, id := range g.Staging {
+		result = append(result, "staging:"+id)
+	}
+	return sortedUnique(result)
+}
+
+// Sync discovers defaulted orgs only when explicitly opted in, then resolves
+// and reconciles the complete policy.
+func Sync(ctx context.Context, cf Foundation, policy Policy, resolver Resolver, opts DNSOptions, dryRun bool, out io.Writer) error {
+	groups, err := loadGroups(ctx, cf)
+	if err != nil {
+		return err
+	}
+	global := globalGroups(groups)
+	if len(global) > 0 && !matchesGlobalDefaults(policy.Defaults, global) {
+		return reportGlobalGroups(global, out)
+	}
+	if policy.Defaults != nil {
+		names, err := cf.ListOrgNames(ctx)
+		if err != nil {
+			return fmt.Errorf("discover orgs for defaults: %w", err)
+		}
+		policy.Orgs = slices.Clone(policy.Orgs)
+		configured := map[string]bool{}
+		for _, org := range policy.Orgs {
+			configured[org.Name] = true
+		}
+		for _, name := range sortedUnique(names) {
+			if !configured[name] {
+				policy.Orgs = append(policy.Orgs, Org{Name: name})
+			}
+		}
+	}
+	orgs, err := Resolve(ctx, policy, resolver, opts)
+	if err != nil {
+		return err
+	}
+	if err := reconcile(ctx, cf, orgs, groups, dryRun, out); err != nil {
+		return err
+	}
+	if len(global) == 0 {
+		return nil
+	}
+	return retireGlobalGroups(ctx, cf, global, dryRun, out)
 }
 
 func ruleKey(rules []Rule) string {
@@ -58,10 +122,25 @@ func orgPrefix(guid string) string {
 }
 
 func Reconcile(ctx context.Context, cf Foundation, orgs []ResolvedOrg, dryRun bool, out io.Writer) error {
+	groups, err := loadGroups(ctx, cf)
+	if err != nil {
+		return err
+	}
+	if global := globalGroups(groups); len(global) > 0 {
+		return reportGlobalGroups(global, out)
+	}
+	return reconcile(ctx, cf, orgs, groups, dryRun, out)
+}
+
+func loadGroups(ctx context.Context, cf Foundation) ([]SecurityGroup, error) {
 	groups, err := cf.ListGroups(ctx)
 	if err != nil {
-		return fmt.Errorf("list ASGs: %w", err)
+		return nil, fmt.Errorf("list ASGs: %w", err)
 	}
+	return groups, nil
+}
+
+func reconcile(ctx context.Context, cf Foundation, orgs []ResolvedOrg, groups []SecurityGroup, dryRun bool, out io.Writer) error {
 	var actions []targetGroup
 	var failures []error
 	for _, org := range orgs {
@@ -99,7 +178,7 @@ func describeDNSFailures(ctx context.Context, cf Foundation, org ResolvedOrg, gr
 	} else {
 		prefix := orgPrefix(guid)
 		for _, g := range groups {
-			if !managedName(g.Name, prefix) || g.Global || g.Unsupported || len(g.Running) == 0 || len(g.Staging) != 0 || g.Name != prefix+ruleKey(g.Rules) || slices.ContainsFunc(g.Running, func(id string) bool { return !inOrg[id] }) {
+			if !managedName(g.Name, prefix) || g.global() || g.Unsupported || len(g.Running)+len(g.Staging) == 0 || g.Name != prefix+ruleKey(g.Rules) || slices.ContainsFunc(g.Running, func(id string) bool { return !inOrg[id] }) || slices.ContainsFunc(g.Staging, func(id string) bool { return !inOrg[id] }) {
 				continue
 			}
 			for _, rule := range g.Rules {
@@ -145,18 +224,18 @@ func applyActions(ctx context.Context, cf Foundation, actions []targetGroup, dry
 				return err
 			}
 			for _, rule := range a.rules {
-				if _, err := fmt.Fprintf(out, "  %s %s:%d\n", rule.Protocol, rule.Destination, rule.Port); err != nil {
+				if _, err := fmt.Fprintf(out, "  %s %s\n", rule.Protocol, rule.displayDestination()); err != nil {
 					return err
 				}
 			}
 		}
 		for _, s := range a.bind {
-			if _, err := fmt.Fprintf(out, "%s bind %s to %s\n", a.org, a.name, s.Name); err != nil {
+			if _, err := fmt.Fprintf(out, "%s bind %s to %s (%s)\n", a.org, a.name, s.Name, s.lifecycle); err != nil {
 				return err
 			}
 		}
 		for _, s := range a.unbind {
-			if _, err := fmt.Fprintf(out, "%s unbind %s from %s\n", a.org, a.name, s.Name); err != nil {
+			if _, err := fmt.Fprintf(out, "%s unbind %s from %s (%s)\n", a.org, a.name, s.Name, s.lifecycle); err != nil {
 				return err
 			}
 		}
@@ -183,20 +262,33 @@ func applyActions(ctx context.Context, cf Foundation, actions []targetGroup, dry
 				return fmt.Errorf("update descriptions for %s: %w", a.name, err)
 			}
 		}
-		if len(a.bind) > 0 {
+		for _, lifecycle := range []string{"running", "staging"} {
 			var ids []string
 			for _, s := range a.bind {
-				ids = append(ids, s.GUID)
+				if s.lifecycle == lifecycle {
+					ids = append(ids, s.GUID)
+				}
 			}
-			if err := cf.BindRunning(ctx, id, ids); err != nil {
-				return fmt.Errorf("bind %s: %w", a.name, err)
+			if len(ids) == 0 {
+				continue
+			}
+			bind := cf.BindRunning
+			if lifecycle == "staging" {
+				bind = cf.BindStaging
+			}
+			if err := bind(ctx, id, ids); err != nil {
+				return fmt.Errorf("bind %s (%s): %w", a.name, lifecycle, err)
 			}
 		}
 	}
 	for _, a := range actions {
 		for _, s := range a.unbind {
-			if err := cf.UnbindRunning(ctx, a.current.GUID, s.GUID); err != nil {
-				return fmt.Errorf("unbind %s from %s: %w", a.name, s.Name, err)
+			unbind := cf.UnbindRunning
+			if s.lifecycle == "staging" {
+				unbind = cf.UnbindStaging
+			}
+			if err := unbind(ctx, a.current.GUID, s.GUID); err != nil {
+				return fmt.Errorf("unbind %s from %s (%s): %w", a.name, s.Name, s.lifecycle, err)
 			}
 		}
 		if a.retire {
@@ -223,13 +315,17 @@ func planOrg(ctx context.Context, cf Foundation, org ResolvedOrg, groups []Secur
 	byGUID := map[string]Space{}
 	byName := map[string]bool{}
 	policies := map[string][]Rule{}
+	bindings := map[string]binding{}
 	for _, s := range spaces {
 		if s.GUID == "" || s.Name == "" || byGUID[s.GUID].GUID != "" || byName[s.Name] {
 			return nil, fmt.Errorf("invalid or duplicate space %q (%s)", s.Name, s.GUID)
 		}
 		byGUID[s.GUID] = s
 		byName[s.Name] = true
-		policies[s.GUID] = org.RulesFor(s.Name)
+		running, staging := binding{s, "running"}, binding{s, "staging"}
+		bindings[running.key()], bindings[staging.key()] = running, staging
+		policies[running.key()] = org.RulesFor(s.Name)
+		policies[staging.key()] = normalize(append(slices.Clone(org.StagingBaseline), org.StagingExtras[s.Name]...))
 	}
 	for name := range org.Extras {
 		if !byName[name] {
@@ -245,7 +341,7 @@ func planOrg(ctx context.Context, cf Foundation, org ResolvedOrg, groups []Secur
 		if !managedName(g.Name, prefix) {
 			continue
 		}
-		if g.Global {
+		if g.global() {
 			return nil, fmt.Errorf("managed ASG %s is globally enabled", g.Name)
 		}
 		for _, id := range append(slices.Clone(g.Running), g.Staging...) {
@@ -253,14 +349,11 @@ func planOrg(ctx context.Context, cf Foundation, org ResolvedOrg, groups []Secur
 				return nil, fmt.Errorf("managed ASG %s has a binding outside the org: %s", g.Name, id)
 			}
 		}
-		if len(g.Staging) != 0 {
-			return nil, fmt.Errorf("managed ASG %s has unexpected staging bindings", g.Name)
-		}
 		if g.GUID == "" || managed[g.Name].GUID != "" || g.Unsupported || g.Name != prefix+ruleKey(g.Rules) {
 			return nil, fmt.Errorf("managed ASG %s has invalid identity or rules", g.Name)
 		}
 		managed[g.Name] = g
-		existing = append(existing, Group{Rules: normalize(slices.Clone(g.Rules)), Spaces: sortedUnique(g.Running)})
+		existing = append(existing, Group{Rules: normalize(slices.Clone(g.Rules)), Spaces: currentBindings(g)})
 	}
 	desired, err := Minimize(ctx, policies, existing)
 	if err != nil {
@@ -279,14 +372,15 @@ func planOrg(ctx context.Context, cf Foundation, org ResolvedOrg, groups []Secur
 			}
 		}
 		a.update = current.GUID != "" && !maps.Equal(a.descriptions, current.Descriptions)
+		bound := currentBindings(current)
 		for _, id := range g.Spaces {
-			if !slices.Contains(current.Running, id) {
-				a.bind = append(a.bind, byGUID[id])
+			if !slices.Contains(bound, id) {
+				a.bind = append(a.bind, bindings[id])
 			}
 		}
-		for _, id := range sortedUnique(current.Running) {
+		for _, id := range bound {
 			if !slices.Contains(g.Spaces, id) {
-				a.unbind = append(a.unbind, byGUID[id])
+				a.unbind = append(a.unbind, bindings[id])
 			}
 		}
 		if current.GUID == "" || a.update || len(a.bind)+len(a.unbind) > 0 {
@@ -298,8 +392,8 @@ func planOrg(ctx context.Context, cf Foundation, org ResolvedOrg, groups []Secur
 			continue
 		}
 		a := targetGroup{name: g.Name, org: org.Name, rules: g.Rules, current: g, retire: true}
-		for _, id := range sortedUnique(g.Running) {
-			a.unbind = append(a.unbind, byGUID[id])
+		for _, id := range currentBindings(g) {
+			a.unbind = append(a.unbind, bindings[id])
 		}
 		actions = append(actions, a)
 	}

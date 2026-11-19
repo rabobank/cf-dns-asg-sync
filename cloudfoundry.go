@@ -4,10 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -75,6 +73,21 @@ func (c *cloudFoundry) FindOrg(ctx context.Context, name string) (string, error)
 	return guid, nil
 }
 
+func (c *cloudFoundry) ListOrgNames(ctx context.Context) ([]string, error) {
+	orgs, err := c.client.Organizations.ListAll(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, org := range orgs {
+		if org == nil || org.Name == "" {
+			return nil, fmt.Errorf("invalid org returned by CAPI")
+		}
+		names = append(names, org.Name)
+	}
+	return names, nil
+}
+
 func (c *cloudFoundry) ListSpaces(ctx context.Context, org string) ([]Space, error) {
 	opts := client.NewSpaceListOptions()
 	opts.OrganizationGUIDs.EqualTo(org)
@@ -99,12 +112,15 @@ func (c *cloudFoundry) ListGroups(ctx context.Context) ([]SecurityGroup, error) 
 	}
 	var result []SecurityGroup
 	for _, g := range groups {
-		if g == nil || !strings.HasPrefix(g.Name, namePrefix) {
+		if g == nil {
 			continue
 		}
 		running, staging := g.GloballyEnabled.Running, g.GloballyEnabled.Staging
-		group := SecurityGroup{GUID: g.GUID, Name: g.Name, Global: running != nil && *running || staging != nil && *staging}
-		group.Unsupported = running == nil || staging == nil || g.Relationships.RunningSpaces.Data == nil || g.Relationships.StagingSpaces.Data == nil
+		group := SecurityGroup{GUID: g.GUID, Name: g.Name, GlobalRunning: running != nil && *running, GlobalStaging: staging != nil && *staging}
+		if !group.global() && !strings.HasPrefix(g.Name, namePrefix) {
+			continue
+		}
+		group.Unsupported = running == nil || staging == nil || (!group.global() && (g.Relationships.RunningSpaces.Data == nil || g.Relationships.StagingSpaces.Data == nil))
 		for _, s := range g.Relationships.RunningSpaces.Data {
 			group.Running = append(group.Running, s.GUID)
 		}
@@ -112,18 +128,21 @@ func (c *cloudFoundry) ListGroups(ctx context.Context) ([]SecurityGroup, error) 
 			group.Staging = append(group.Staging, s.GUID)
 		}
 		for _, r := range g.Rules {
-			ip, err := netip.ParseAddr(r.Destination)
-			if err != nil || ip.Zone() != "" || (r.Protocol != "tcp" && r.Protocol != "udp") || r.Ports == nil || r.Log != nil && *r.Log || r.Code != nil || r.Type != nil {
-				group.Unsupported = true
-				continue
-			}
-			for _, p := range strings.Split(*r.Ports, ",") {
-				port, err := strconv.ParseUint(p, 10, 16)
-				if err != nil || port == 0 {
+			var ports PortSpec
+			if r.Ports != nil {
+				var err error
+				ports, err = parsePorts(*r.Ports)
+				if err != nil {
 					group.Unsupported = true
 					continue
 				}
-				rule := Rule{ip.Unmap().String(), r.Protocol, uint16(port)}
+			}
+			rules, err := destinationRules(r.Destination, r.Protocol, ports, r.Type, r.Code, r.Log != nil && *r.Log)
+			if err != nil {
+				group.Unsupported = true
+				continue
+			}
+			for _, rule := range rules {
 				group.Rules = append(group.Rules, rule)
 				if r.Description != nil && *r.Description != "" {
 					if group.Descriptions == nil {
@@ -153,19 +172,47 @@ func (c *cloudFoundry) UpdateGroupDescriptions(ctx context.Context, id string, r
 	return err
 }
 
+func (c *cloudFoundry) DisableGlobalGroup(ctx context.Context, id string, running, staging bool) error {
+	flags := &resource.SecurityGroupGloballyEnabled{}
+	if running {
+		flags.Running = new(false)
+	}
+	if staging {
+		flags.Staging = new(false)
+	}
+	_, err := c.client.SecurityGroups.Update(ctx, id, &resource.SecurityGroupUpdate{GloballyEnabled: flags})
+	return err
+}
+
 func securityGroupRules(rules []Rule, descriptions RuleDescriptions) []*resource.SecurityGroupRule {
-	type key struct{ destination, protocol, description string }
+	type key struct {
+		rule        Rule
+		description string
+	}
 	byKey := map[key]*resource.SecurityGroupRule{}
 	var result []*resource.SecurityGroupRule
 	for _, r := range normalize(slices.Clone(rules)) {
-		p := strconv.Itoa(int(r.Port))
+		p := r.portString()
 		d := descriptions[r]
-		k := key{r.Destination, r.Protocol, d}
-		if current := byKey[k]; current != nil {
+		k := key{r, d}
+		if r.PortEnd == 0 {
+			k.rule.Port = 0
+		}
+		if current := byKey[k]; current != nil && p != "" && r.PortEnd == 0 {
 			*current.Ports += "," + p
 			continue
 		}
-		entry := &resource.SecurityGroupRule{Destination: r.Destination, Protocol: r.Protocol, Ports: &p}
+		entry := &resource.SecurityGroupRule{Destination: r.Destination, Protocol: r.Protocol}
+		if p != "" {
+			entry.Ports = &p
+		}
+		if r.Log {
+			entry.Log = new(true)
+		}
+		if r.Protocol == "icmp" || r.Protocol == "icmpv6" {
+			entry.Type = &r.Type
+			entry.Code = &r.Code
+		}
 		if d != "" {
 			entry.Description = &d
 		}
@@ -182,6 +229,15 @@ func (c *cloudFoundry) BindRunning(ctx context.Context, group string, spaces []s
 
 func (c *cloudFoundry) UnbindRunning(ctx context.Context, group, space string) error {
 	return c.client.SecurityGroups.UnBindRunningSecurityGroup(ctx, group, space)
+}
+
+func (c *cloudFoundry) BindStaging(ctx context.Context, group string, spaces []string) error {
+	_, err := c.client.SecurityGroups.BindStagingSecurityGroup(ctx, group, spaces)
+	return err
+}
+
+func (c *cloudFoundry) UnbindStaging(ctx context.Context, group, space string) error {
+	return c.client.SecurityGroups.UnBindStagingSecurityGroup(ctx, group, space)
 }
 
 func (c *cloudFoundry) DeleteGroup(ctx context.Context, group string) error {

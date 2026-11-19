@@ -1,0 +1,40 @@
+# Copy all existing global rules you intend to preserve. This is a sample,
+# not a complete replacement for the stock public_networks security group.
+defaults:
+  - destination: 10.246.0.53
+    protocol: udp
+    ports: "53"
+  - destination: 10.246.0.53
+    protocol: tcp
+    ports: "53"
+  - destination: 0.0.0.0-9.255.255.255
+    protocol: all
+
+orgs:
+  - name: payments
+    # An explicit allow list replaces defaults for both lifecycles.
+    allow:
+      - destination: 10.246.0.53
+        protocol: udp
+        ports: "53"
+      - destination: 10.246.0.53
+        protocol: tcp
+        ports: "53"
+      - hostname: artifacts.example.com
+        protocol: tcp
+        ports: [443]
+        lifecycles: [staging]
+      - hostname: api.payment-provider.example.com
+        protocol: tcp
+        ports: [443]
+        lifecycles: [running]
+
+  - name: reporting
+    # Inherits defaults; dev gets an additive running rule.
+    spaces:
+      - name: dev
+        allow:
+          - destination: 10.246.20.15
+            protocol: tcp
+            ports: "5432"
+            lifecycles: [running]

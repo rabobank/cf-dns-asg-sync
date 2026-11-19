@@ -8,8 +8,41 @@ Build with Go 1.26 or later: `go build ./cmd/cf-dns-asg-sync`. See
 [`examples/policy.yml`](examples/policy.yml) for the policy format. Org and space
 names match Cloud Foundry exactly. An org with no `spaces` list applies its rules
 to all spaces in that org. Each named space gets any extra rules in addition to
-the org's rules. `allow: []` with no space entries removes the org's managed rules;
-omitting the org from the file leaves it alone.
+the org's rules. **Omitting `lifecycles` applies a rule to both staging and
+running.** Set `lifecycles: [running]` on existing rules that should remain
+running-only when upgrading. Use `[staging]` for staging-only rules.
+
+## Migrating global rules
+
+[`examples/migration.yml`](examples/migration.yml) shows how to configure
+`defaults`. When present, the utility discovers all orgs and applies the defaults
+to unlisted orgs and to listed orgs that omit `allow`. An explicit org `allow`
+replaces defaults for both lifecycles. `allow: []` opts out of the default
+baseline; any space overrides still apply. Without `defaults`, unlisted orgs
+are untouched.
+
+Rules accept either `hostname` or `destination`. Native destinations support
+IPs, CIDRs, ranges, and comma-separated lists (expanded into separate
+destinations). TCP and UDP accept a port, a comma-separated port string, a port
+range, or a YAML list of ports. Native rules also support `all`, `icmp`,
+`icmpv6`, TCP logging, and descriptions. Explicit native destinations do not
+require `--allow-private-cidr`; that guard applies to DNS answers.
+
+If the foundation has global ASGs and `defaults` doesn't match their normalized
+destination rules and lifecycle assignments, the utility exits nonzero and
+prints a copyable `defaults:` block to stdout. Use that block for the cutover.
+Add any global grants that explicit org `allow` lists still need, including
+DNS and staging dependencies.
+
+With matching defaults, dry-run previews the replacement and cutover. Apply
+reconciles the replacement space bindings first and disables the old global
+bindings only after reconciliation succeeds. The original ASGs and their
+explicit space bindings remain. A failure while disabling multiple global ASGs
+can leave some enabled; the replacement bindings are already in place. Review
+the remaining global groups and the defaults reported on the next run before
+continuing.
+
+## Authentication and execution
 
 Set `CF_API` to the foundation's HTTPS API root. Set `CF_USERNAME` and
 `CF_PASSWORD` to a user and password, or to a UAA client ID and secret when using
@@ -24,9 +57,9 @@ destinations. Loopback and link-local addresses are never permitted.
 
 ## Reconciliation
 
-- The utility computes the **minimum** number of managed ASGs for each org's
-  current spaces. A missing configured space or exhausted solver budget aborts
-  before writing.
+- The utility computes the **minimum** number of managed ASGs per org across
+  staging and running bindings for the normalized rules. A missing configured
+  space or exhausted solver budget aborts before writing.
 - A DNS error or empty answer leaves the affected org's existing ASGs and space
   bindings intact. Healthy orgs can still sync, and the command exits nonzero so
   Concourse reports the failure. A first-run failure adds no grants.
@@ -38,8 +71,9 @@ destinations. Loopback and link-local addresses are never permitted.
   time series of DNS answers. Older ASGs get descriptions on a successful sync.
 - Managed ASGs have content-addressed names under the reserved
   `cf-dns-asg-sync-` prefix. Do not edit or bind these groups manually. An ASG that
-  is global or bound outside its owning org blocks reconciliation. Other groups
-  and unlisted orgs are untouched. Bindings are for the running lifecycle.
+  is global or bound outside its owning org blocks reconciliation. The utility
+  does not modify independently managed groups except to disable global
+  bindings during a matching-defaults migration.
 - The sync adds replacement coverage before revoking old coverage. Changes are
   not atomic: a failed run can leave old grants until a later run completes.
 - New spaces inherit the org policy on the next successful run. Already-running

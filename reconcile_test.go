@@ -42,7 +42,7 @@ var _ = Describe("ASG reconciliation", func() {
 	})
 
 	It("binds one group to all spaces for an org-only entry and picks up new spaces on the next sync", func(ctx SpecContext) {
-		existing = append(existing, sync.SecurityGroup{GUID: "foreign", Name: "cf-dns-asg-sync-reporting-guid-other", Global: true, Running: []string{"foreign-space"}})
+		existing = append(existing, sync.SecurityGroup{GUID: "foreign", Name: "cf-dns-asg-sync-reporting-guid-other", Running: []string{"foreign-space"}})
 		Expect(sync.Reconcile(ctx, cf, []sync.ResolvedOrg{org}, false, io.Discard)).To(Succeed())
 		Expect(cf.CreateGroupCallCount()).To(Equal(1))
 		Expect(existing[1].Running).To(ConsistOf("dev-guid", "prod-guid"))
@@ -68,6 +68,113 @@ var _ = Describe("ASG reconciliation", func() {
 		Expect(existing[0].Name).NotTo(Equal(existing[1].Name))
 		Expect(existing[0].Running).To(Equal([]string{"payments-guid-dev"}))
 		Expect(existing[1].Running).To(Equal([]string{"reporting-guid-dev"}))
+	})
+
+	It("applies defaults to discovered orgs, shares a group across lifecycles, and honors explicit overrides", func(ctx SpecContext) {
+		cf.ListOrgNamesReturns([]string{"discovered", "payments", "optout", "override"}, nil)
+		cf.FindOrgCalls(func(_ context.Context, name string) (string, error) { return name + "-guid", nil })
+		cf.ListSpacesCalls(func(_ context.Context, org string) ([]sync.Space, error) {
+			return []sync.Space{{Name: "dev", GUID: org + "-dev"}}, nil
+		})
+		cf.BindStagingCalls(func(_ context.Context, id string, spaces []string) error {
+			for i := range existing {
+				if existing[i].GUID == id {
+					existing[i].Staging = append(existing[i].Staging, spaces...)
+					return nil
+				}
+			}
+			return fmt.Errorf("unknown group %s", id)
+		})
+		policy, err := sync.ParsePolicy(strings.NewReader(`defaults:
+  - {destination: 192.0.2.0/24, protocol: all}
+orgs:
+  - name: payments
+    spaces:
+      - name: dev
+        allow: [{destination: 198.51.100.1, protocol: tcp, ports: '443', lifecycles: [staging]}]
+  - name: override
+    allow: [{destination: 203.0.113.1, protocol: tcp, ports: '443', lifecycles: [running]}]
+  - name: optout
+    allow: []
+`))
+		Expect(err).NotTo(HaveOccurred())
+		resolver := &asgsyncfakes.FakeResolver{}
+		Expect(sync.Sync(ctx, cf, policy, resolver, sync.DNSOptions{}, false, io.Discard)).To(Succeed())
+		Expect(existing).To(HaveLen(4))
+		base := sync.Rule{Destination: "192.0.2.0/24", Protocol: "all"}
+		extra := sync.Rule{Destination: "198.51.100.1", Protocol: "tcp", Port: 443}
+		override := sync.Rule{Destination: "203.0.113.1", Protocol: "tcp", Port: 443}
+		for _, g := range existing {
+			if len(g.Running) > 0 && g.Running[0] == "discovered-guid-dev" {
+				Expect(g.Staging).To(Equal(g.Running))
+				Expect(g.Rules).To(Equal([]sync.Rule{base}))
+			}
+		}
+		for _, tc := range []struct {
+			id         string
+			run, stage []sync.Rule
+		}{
+			{"discovered-guid-dev", []sync.Rule{base}, []sync.Rule{base}},
+			{"payments-guid-dev", []sync.Rule{base}, []sync.Rule{base, extra}},
+			{"override-guid-dev", []sync.Rule{override}, nil},
+			{"optout-guid-dev", nil, nil},
+		} {
+			run, stage := map[sync.Rule]bool{}, map[sync.Rule]bool{}
+			for _, g := range existing {
+				for _, id := range g.Running {
+					if id == tc.id {
+						for _, r := range g.Rules {
+							run[r] = true
+						}
+					}
+				}
+				for _, id := range g.Staging {
+					if id == tc.id {
+						for _, r := range g.Rules {
+							stage[r] = true
+						}
+					}
+				}
+			}
+			Expect(run).To(HaveLen(len(tc.run)))
+			Expect(stage).To(HaveLen(len(tc.stage)))
+			for _, r := range tc.run {
+				Expect(run).To(HaveKey(r))
+			}
+			for _, r := range tc.stage {
+				Expect(stage).To(HaveKey(r))
+			}
+		}
+		Expect(sync.Sync(ctx, cf, policy, resolver, sync.DNSOptions{}, false, io.Discard)).To(Succeed())
+		Expect(cf.CreateGroupCallCount()).To(Equal(4))
+		Expect(cf.BindStagingCallCount()).To(Equal(3))
+		Expect(cf.BindRunningCallCount()).To(Equal(3))
+		Expect(cf.DeleteGroupCallCount()).To(BeZero())
+		Expect(resolver.LookupNetIPCallCount()).To(BeZero())
+	})
+
+	It("does not enumerate unlisted orgs unless defaults are configured", func(ctx SpecContext) {
+		policy, err := sync.ParsePolicy(strings.NewReader(`orgs: [{name: payments}]`))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sync.Sync(ctx, cf, policy, &asgsyncfakes.FakeResolver{}, sync.DNSOptions{}, false, io.Discard)).To(Succeed())
+		Expect(cf.ListOrgNamesCallCount()).To(BeZero())
+	})
+
+	It("removes a staging binding without replacing the existing running ASG", func(ctx SpecContext) {
+		cf.BindStagingCalls(func(_ context.Context, _ string, ids []string) error {
+			existing[0].Staging = append(existing[0].Staging, ids...)
+			return nil
+		})
+		org.StagingBaseline = org.Baseline
+		Expect(sync.Reconcile(ctx, cf, []sync.ResolvedOrg{org}, false, io.Discard)).To(Succeed())
+		Expect(existing).To(HaveLen(1))
+		Expect(existing[0].Staging).To(ConsistOf("dev-guid", "prod-guid"))
+		org.StagingBaseline = nil
+		Expect(sync.Reconcile(ctx, cf, []sync.ResolvedOrg{org}, false, io.Discard)).To(Succeed())
+		Expect(cf.UnbindStagingCallCount()).To(Equal(2))
+		Expect(cf.UnbindRunningCallCount()).To(BeZero())
+		Expect(cf.DeleteGroupCallCount()).To(BeZero())
+		Expect(cf.CreateGroupCallCount()).To(Equal(1))
 	})
 
 	It("refuses to mutate a managed group bound outside its org", func(ctx SpecContext) {

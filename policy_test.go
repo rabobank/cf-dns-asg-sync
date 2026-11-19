@@ -91,5 +91,29 @@ var _ = Describe("DNS policy", func() {
 		Entry("unknown field", "orgs: [{name: payments, alow: []}]"),
 		Entry("multiple documents", "orgs: [{name: payments}]\n---\norgs: [{name: reporting}]"),
 		Entry("invalid hostname and port", "orgs: [{name: payments, allow: [{hostname: '*.example.org', protocol: tcp, ports: [0]}]}]"),
+		Entry("hostname and destination", "orgs: [{name: payments, allow: [{hostname: a.example.org, destination: 192.0.2.1, protocol: tcp, ports: [443]}]}]"),
+		Entry("reversed range", "orgs: [{name: payments, allow: [{destination: 192.0.2.10-192.0.2.1, protocol: all}]}]"),
+		Entry("ports on all", "orgs: [{name: payments, allow: [{destination: 192.0.2.0/24, protocol: all, ports: '443'}]}]"),
+		Entry("missing ICMP code", "orgs: [{name: payments, allow: [{destination: 192.0.2.1, protocol: icmp, type: 0}]}]"),
+		Entry("negative port", "orgs: [{name: payments, allow: [{destination: 192.0.2.1, protocol: tcp, ports: '-1'}]}]"),
+		Entry("empty lifecycles", "defaults: [{destination: 192.0.2.1, protocol: all, lifecycles: []}]"),
+		Entry("unknown lifecycle", "defaults: [{destination: 192.0.2.1, protocol: all, lifecycles: [build]}]"),
 	)
+
+	It("resolves native Cloud Foundry rules without a DNS lookup", func(ctx SpecContext) {
+		policy, err := sync.ParsePolicy(strings.NewReader(`orgs:
+  - name: payments
+    allow:
+      - {destination: 0.0.0.0-9.255.255.255, protocol: all}
+      - {destination: '10.0.0.0/24,10.0.1.1', protocol: udp, ports: '53'}
+      - {destination: 192.0.2.1, protocol: tcp, ports: '8000-8100', log: true, description: lab}
+      - {destination: 192.0.2.1, protocol: icmp, type: 0, code: -1}
+`))
+		Expect(err).NotTo(HaveOccurred())
+		orgs, err := sync.Resolve(ctx, policy, resolver, sync.DNSOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resolver.LookupNetIPCallCount()).To(BeZero())
+		Expect(orgs[0].Baseline).To(HaveLen(5))
+		Expect(orgs[0].Descriptions).To(HaveLen(1))
+	})
 })

@@ -18,6 +18,15 @@ type FakeFoundation struct {
 	bindRunningReturnsOnCall map[int]struct {
 		result1 error
 	}
+	BindStagingStub        func(context.Context, string, []string) error
+	bindStagingMutex       sync.RWMutex
+	bindStagingArgsForCall []FakeFoundationBindStagingArgs
+	bindStagingReturns     struct {
+		result1 error
+	}
+	bindStagingReturnsOnCall map[int]struct {
+		result1 error
+	}
 	CreateGroupStub        func(context.Context, string, []asgsync.Rule, asgsync.RuleDescriptions) (string, error)
 	createGroupMutex       sync.RWMutex
 	createGroupArgsForCall []FakeFoundationCreateGroupArgs
@@ -36,6 +45,15 @@ type FakeFoundation struct {
 		result1 error
 	}
 	deleteGroupReturnsOnCall map[int]struct {
+		result1 error
+	}
+	DisableGlobalGroupStub        func(context.Context, string, bool, bool) error
+	disableGlobalGroupMutex       sync.RWMutex
+	disableGlobalGroupArgsForCall []FakeFoundationDisableGlobalGroupArgs
+	disableGlobalGroupReturns     struct {
+		result1 error
+	}
+	disableGlobalGroupReturnsOnCall map[int]struct {
 		result1 error
 	}
 	FindOrgStub        func(context.Context, string) (string, error)
@@ -60,6 +78,17 @@ type FakeFoundation struct {
 		result1 []asgsync.SecurityGroup
 		result2 error
 	}
+	ListOrgNamesStub        func(context.Context) ([]string, error)
+	listOrgNamesMutex       sync.RWMutex
+	listOrgNamesArgsForCall []FakeFoundationListOrgNamesArgs
+	listOrgNamesReturns     struct {
+		result1 []string
+		result2 error
+	}
+	listOrgNamesReturnsOnCall map[int]struct {
+		result1 []string
+		result2 error
+	}
 	ListSpacesStub        func(context.Context, string) ([]asgsync.Space, error)
 	listSpacesMutex       sync.RWMutex
 	listSpacesArgsForCall []FakeFoundationListSpacesArgs
@@ -78,6 +107,15 @@ type FakeFoundation struct {
 		result1 error
 	}
 	unbindRunningReturnsOnCall map[int]struct {
+		result1 error
+	}
+	UnbindStagingStub        func(context.Context, string, string) error
+	unbindStagingMutex       sync.RWMutex
+	unbindStagingArgsForCall []FakeFoundationUnbindStagingArgs
+	unbindStagingReturns     struct {
+		result1 error
+	}
+	unbindStagingReturnsOnCall map[int]struct {
 		result1 error
 	}
 	UpdateGroupDescriptionsStub        func(context.Context, string, []asgsync.Rule, asgsync.RuleDescriptions) error
@@ -101,6 +139,13 @@ type FakeFoundationBindRunningArgs struct {
 	Arg3 []string
 }
 
+// FakeFoundationBindStagingArgs holds the arguments of one call to BindStaging.
+type FakeFoundationBindStagingArgs struct {
+	Arg1 context.Context
+	Arg2 string
+	Arg3 []string
+}
+
 // FakeFoundationCreateGroupArgs holds the arguments of one call to CreateGroup.
 type FakeFoundationCreateGroupArgs struct {
 	Arg1 context.Context
@@ -115,6 +160,14 @@ type FakeFoundationDeleteGroupArgs struct {
 	Arg2 string
 }
 
+// FakeFoundationDisableGlobalGroupArgs holds the arguments of one call to DisableGlobalGroup.
+type FakeFoundationDisableGlobalGroupArgs struct {
+	Arg1 context.Context
+	Arg2 string
+	Arg3 bool
+	Arg4 bool
+}
+
 // FakeFoundationFindOrgArgs holds the arguments of one call to FindOrg.
 type FakeFoundationFindOrgArgs struct {
 	Arg1 context.Context
@@ -126,6 +179,11 @@ type FakeFoundationListGroupsArgs struct {
 	Arg1 context.Context
 }
 
+// FakeFoundationListOrgNamesArgs holds the arguments of one call to ListOrgNames.
+type FakeFoundationListOrgNamesArgs struct {
+	Arg1 context.Context
+}
+
 // FakeFoundationListSpacesArgs holds the arguments of one call to ListSpaces.
 type FakeFoundationListSpacesArgs struct {
 	Arg1 context.Context
@@ -134,6 +192,13 @@ type FakeFoundationListSpacesArgs struct {
 
 // FakeFoundationUnbindRunningArgs holds the arguments of one call to UnbindRunning.
 type FakeFoundationUnbindRunningArgs struct {
+	Arg1 context.Context
+	Arg2 string
+	Arg3 string
+}
+
+// FakeFoundationUnbindStagingArgs holds the arguments of one call to UnbindStaging.
+type FakeFoundationUnbindStagingArgs struct {
 	Arg1 context.Context
 	Arg2 string
 	Arg3 string
@@ -215,6 +280,78 @@ func (fake *FakeFoundation) BindRunningReturnsOnCall(i int, result1 error) {
 		})
 	}
 	fake.bindRunningReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeFoundation) BindStaging(arg1 context.Context, arg2 string, arg3 []string) error {
+	var arg3Copy []string
+	if arg3 != nil {
+		arg3Copy = make([]string, len(arg3))
+		copy(arg3Copy, arg3)
+	}
+	fake.bindStagingMutex.Lock()
+	ret, specificReturn := fake.bindStagingReturnsOnCall[len(fake.bindStagingArgsForCall)]
+	fake.bindStagingArgsForCall = append(fake.bindStagingArgsForCall, FakeFoundationBindStagingArgs{arg1, arg2, arg3Copy})
+	stub := fake.BindStagingStub
+	fakeReturns := fake.bindStagingReturns
+	fake.recordInvocation("BindStaging", []interface{}{arg1, arg2, arg3Copy})
+	fake.bindStagingMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeFoundation) BindStagingCallCount() int {
+	fake.bindStagingMutex.RLock()
+	defer fake.bindStagingMutex.RUnlock()
+	return len(fake.bindStagingArgsForCall)
+}
+
+func (fake *FakeFoundation) BindStagingCalls(stub func(context.Context, string, []string) error) {
+	fake.bindStagingMutex.Lock()
+	defer fake.bindStagingMutex.Unlock()
+	fake.BindStagingStub = stub
+}
+
+func (fake *FakeFoundation) BindStagingArgsForCall(i int) (context.Context, string, []string) {
+	fake.bindStagingMutex.RLock()
+	defer fake.bindStagingMutex.RUnlock()
+	argsForCall := fake.bindStagingArgsForCall[i]
+	return argsForCall.Arg1, argsForCall.Arg2, argsForCall.Arg3
+}
+
+func (fake *FakeFoundation) BindStagingArgs() []FakeFoundationBindStagingArgs {
+	fake.bindStagingMutex.RLock()
+	defer fake.bindStagingMutex.RUnlock()
+	args := make([]FakeFoundationBindStagingArgs, len(fake.bindStagingArgsForCall))
+	copy(args, fake.bindStagingArgsForCall)
+	return args
+}
+
+func (fake *FakeFoundation) BindStagingReturns(result1 error) {
+	fake.bindStagingMutex.Lock()
+	defer fake.bindStagingMutex.Unlock()
+	fake.BindStagingStub = nil
+	fake.bindStagingReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeFoundation) BindStagingReturnsOnCall(i int, result1 error) {
+	fake.bindStagingMutex.Lock()
+	defer fake.bindStagingMutex.Unlock()
+	fake.BindStagingStub = nil
+	if fake.bindStagingReturnsOnCall == nil {
+		fake.bindStagingReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.bindStagingReturnsOnCall[i] = struct {
 		result1 error
 	}{result1}
 }
@@ -361,6 +498,73 @@ func (fake *FakeFoundation) DeleteGroupReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
+func (fake *FakeFoundation) DisableGlobalGroup(arg1 context.Context, arg2 string, arg3 bool, arg4 bool) error {
+	fake.disableGlobalGroupMutex.Lock()
+	ret, specificReturn := fake.disableGlobalGroupReturnsOnCall[len(fake.disableGlobalGroupArgsForCall)]
+	fake.disableGlobalGroupArgsForCall = append(fake.disableGlobalGroupArgsForCall, FakeFoundationDisableGlobalGroupArgs{arg1, arg2, arg3, arg4})
+	stub := fake.DisableGlobalGroupStub
+	fakeReturns := fake.disableGlobalGroupReturns
+	fake.recordInvocation("DisableGlobalGroup", []interface{}{arg1, arg2, arg3, arg4})
+	fake.disableGlobalGroupMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3, arg4)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeFoundation) DisableGlobalGroupCallCount() int {
+	fake.disableGlobalGroupMutex.RLock()
+	defer fake.disableGlobalGroupMutex.RUnlock()
+	return len(fake.disableGlobalGroupArgsForCall)
+}
+
+func (fake *FakeFoundation) DisableGlobalGroupCalls(stub func(context.Context, string, bool, bool) error) {
+	fake.disableGlobalGroupMutex.Lock()
+	defer fake.disableGlobalGroupMutex.Unlock()
+	fake.DisableGlobalGroupStub = stub
+}
+
+func (fake *FakeFoundation) DisableGlobalGroupArgsForCall(i int) (context.Context, string, bool, bool) {
+	fake.disableGlobalGroupMutex.RLock()
+	defer fake.disableGlobalGroupMutex.RUnlock()
+	argsForCall := fake.disableGlobalGroupArgsForCall[i]
+	return argsForCall.Arg1, argsForCall.Arg2, argsForCall.Arg3, argsForCall.Arg4
+}
+
+func (fake *FakeFoundation) DisableGlobalGroupArgs() []FakeFoundationDisableGlobalGroupArgs {
+	fake.disableGlobalGroupMutex.RLock()
+	defer fake.disableGlobalGroupMutex.RUnlock()
+	args := make([]FakeFoundationDisableGlobalGroupArgs, len(fake.disableGlobalGroupArgsForCall))
+	copy(args, fake.disableGlobalGroupArgsForCall)
+	return args
+}
+
+func (fake *FakeFoundation) DisableGlobalGroupReturns(result1 error) {
+	fake.disableGlobalGroupMutex.Lock()
+	defer fake.disableGlobalGroupMutex.Unlock()
+	fake.DisableGlobalGroupStub = nil
+	fake.disableGlobalGroupReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeFoundation) DisableGlobalGroupReturnsOnCall(i int, result1 error) {
+	fake.disableGlobalGroupMutex.Lock()
+	defer fake.disableGlobalGroupMutex.Unlock()
+	fake.DisableGlobalGroupStub = nil
+	if fake.disableGlobalGroupReturnsOnCall == nil {
+		fake.disableGlobalGroupReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.disableGlobalGroupReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
 func (fake *FakeFoundation) FindOrg(arg1 context.Context, arg2 string) (string, error) {
 	fake.findOrgMutex.Lock()
 	ret, specificReturn := fake.findOrgReturnsOnCall[len(fake.findOrgArgsForCall)]
@@ -501,6 +705,76 @@ func (fake *FakeFoundation) ListGroupsReturnsOnCall(i int, result1 []asgsync.Sec
 	}{result1, result2}
 }
 
+func (fake *FakeFoundation) ListOrgNames(arg1 context.Context) ([]string, error) {
+	fake.listOrgNamesMutex.Lock()
+	ret, specificReturn := fake.listOrgNamesReturnsOnCall[len(fake.listOrgNamesArgsForCall)]
+	fake.listOrgNamesArgsForCall = append(fake.listOrgNamesArgsForCall, FakeFoundationListOrgNamesArgs{arg1})
+	stub := fake.ListOrgNamesStub
+	fakeReturns := fake.listOrgNamesReturns
+	fake.recordInvocation("ListOrgNames", []interface{}{arg1})
+	fake.listOrgNamesMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeFoundation) ListOrgNamesCallCount() int {
+	fake.listOrgNamesMutex.RLock()
+	defer fake.listOrgNamesMutex.RUnlock()
+	return len(fake.listOrgNamesArgsForCall)
+}
+
+func (fake *FakeFoundation) ListOrgNamesCalls(stub func(context.Context) ([]string, error)) {
+	fake.listOrgNamesMutex.Lock()
+	defer fake.listOrgNamesMutex.Unlock()
+	fake.ListOrgNamesStub = stub
+}
+
+func (fake *FakeFoundation) ListOrgNamesArgsForCall(i int) context.Context {
+	fake.listOrgNamesMutex.RLock()
+	defer fake.listOrgNamesMutex.RUnlock()
+	argsForCall := fake.listOrgNamesArgsForCall[i]
+	return argsForCall.Arg1
+}
+
+func (fake *FakeFoundation) ListOrgNamesArgs() []FakeFoundationListOrgNamesArgs {
+	fake.listOrgNamesMutex.RLock()
+	defer fake.listOrgNamesMutex.RUnlock()
+	args := make([]FakeFoundationListOrgNamesArgs, len(fake.listOrgNamesArgsForCall))
+	copy(args, fake.listOrgNamesArgsForCall)
+	return args
+}
+
+func (fake *FakeFoundation) ListOrgNamesReturns(result1 []string, result2 error) {
+	fake.listOrgNamesMutex.Lock()
+	defer fake.listOrgNamesMutex.Unlock()
+	fake.ListOrgNamesStub = nil
+	fake.listOrgNamesReturns = struct {
+		result1 []string
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeFoundation) ListOrgNamesReturnsOnCall(i int, result1 []string, result2 error) {
+	fake.listOrgNamesMutex.Lock()
+	defer fake.listOrgNamesMutex.Unlock()
+	fake.ListOrgNamesStub = nil
+	if fake.listOrgNamesReturnsOnCall == nil {
+		fake.listOrgNamesReturnsOnCall = make(map[int]struct {
+			result1 []string
+			result2 error
+		})
+	}
+	fake.listOrgNamesReturnsOnCall[i] = struct {
+		result1 []string
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeFoundation) ListSpaces(arg1 context.Context, arg2 string) ([]asgsync.Space, error) {
 	fake.listSpacesMutex.Lock()
 	ret, specificReturn := fake.listSpacesReturnsOnCall[len(fake.listSpacesArgsForCall)]
@@ -634,6 +908,73 @@ func (fake *FakeFoundation) UnbindRunningReturnsOnCall(i int, result1 error) {
 		})
 	}
 	fake.unbindRunningReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeFoundation) UnbindStaging(arg1 context.Context, arg2 string, arg3 string) error {
+	fake.unbindStagingMutex.Lock()
+	ret, specificReturn := fake.unbindStagingReturnsOnCall[len(fake.unbindStagingArgsForCall)]
+	fake.unbindStagingArgsForCall = append(fake.unbindStagingArgsForCall, FakeFoundationUnbindStagingArgs{arg1, arg2, arg3})
+	stub := fake.UnbindStagingStub
+	fakeReturns := fake.unbindStagingReturns
+	fake.recordInvocation("UnbindStaging", []interface{}{arg1, arg2, arg3})
+	fake.unbindStagingMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeFoundation) UnbindStagingCallCount() int {
+	fake.unbindStagingMutex.RLock()
+	defer fake.unbindStagingMutex.RUnlock()
+	return len(fake.unbindStagingArgsForCall)
+}
+
+func (fake *FakeFoundation) UnbindStagingCalls(stub func(context.Context, string, string) error) {
+	fake.unbindStagingMutex.Lock()
+	defer fake.unbindStagingMutex.Unlock()
+	fake.UnbindStagingStub = stub
+}
+
+func (fake *FakeFoundation) UnbindStagingArgsForCall(i int) (context.Context, string, string) {
+	fake.unbindStagingMutex.RLock()
+	defer fake.unbindStagingMutex.RUnlock()
+	argsForCall := fake.unbindStagingArgsForCall[i]
+	return argsForCall.Arg1, argsForCall.Arg2, argsForCall.Arg3
+}
+
+func (fake *FakeFoundation) UnbindStagingArgs() []FakeFoundationUnbindStagingArgs {
+	fake.unbindStagingMutex.RLock()
+	defer fake.unbindStagingMutex.RUnlock()
+	args := make([]FakeFoundationUnbindStagingArgs, len(fake.unbindStagingArgsForCall))
+	copy(args, fake.unbindStagingArgsForCall)
+	return args
+}
+
+func (fake *FakeFoundation) UnbindStagingReturns(result1 error) {
+	fake.unbindStagingMutex.Lock()
+	defer fake.unbindStagingMutex.Unlock()
+	fake.UnbindStagingStub = nil
+	fake.unbindStagingReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeFoundation) UnbindStagingReturnsOnCall(i int, result1 error) {
+	fake.unbindStagingMutex.Lock()
+	defer fake.unbindStagingMutex.Unlock()
+	fake.UnbindStagingStub = nil
+	if fake.unbindStagingReturnsOnCall == nil {
+		fake.unbindStagingReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.unbindStagingReturnsOnCall[i] = struct {
 		result1 error
 	}{result1}
 }

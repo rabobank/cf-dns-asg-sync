@@ -63,13 +63,9 @@ func run(ctx context.Context, args []string, out, stderr io.Writer) error {
 	ctx, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
 	resolver := &net.Resolver{PreferGo: true, StrictErrors: true}
-	orgs, err := sync.Resolve(ctx, policy, resolver, sync.DNSOptions{IPv6: *ipv6, PrivateCIDRs: private})
-	if err != nil {
-		return err
-	}
 	cf, err := sync.NewCloudFoundry(os.Getenv, *credentials)
 	if err != nil {
 		return err
 	}
-	return sync.Reconcile(ctx, cf, orgs, *dryRun, out)
+	return sync.Sync(ctx, cf, policy, resolver, sync.DNSOptions{IPv6: *ipv6, PrivateCIDRs: private}, *dryRun, out)
 }
