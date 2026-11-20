@@ -1,6 +1,6 @@
 # cf-dns-asg-sync
 
-Sync Cloud Foundry egress rules from DNS allowlists, one org at a time.
+Sync Cloud Foundry egress rules from DNS allowlists and share ASGs across managed spaces.
 
 ## Use it
 
@@ -8,8 +8,41 @@ Build with Go 1.26 or later: `go build ./cmd/cf-dns-asg-sync`. See
 [`examples/policy.yml`](examples/policy.yml) for the policy format. Org and space
 names match Cloud Foundry exactly. An org with no `spaces` list applies its rules
 to all spaces in that org. Each named space gets any extra rules in addition to
-the org's rules. `allow: []` with no space entries removes the org's managed rules;
-omitting the org from the file leaves it alone.
+the org's rules. **Omitting `lifecycles` applies a rule to both staging and
+running.** Set `lifecycles: [running]` on existing rules that should remain
+running-only when upgrading. Use `[staging]` for staging-only rules.
+
+## Migrating global rules
+
+[`examples/migration.yml`](examples/migration.yml) shows how to configure
+`defaults`. When present, the utility discovers all orgs and applies the defaults
+to unlisted orgs and to listed orgs that omit `allow`. An explicit org `allow`
+replaces defaults for both lifecycles. `allow: []` opts out of the default
+baseline; any space overrides still apply. Without `defaults`, unlisted orgs
+are untouched.
+
+Rules accept either `hostname` or `destination`. Native destinations support
+IPs, CIDRs, ranges, and comma-separated lists (expanded into separate
+destinations). TCP and UDP accept a port, a comma-separated port string, a port
+range, or a YAML list of ports. Native rules also support `all`, `icmp`,
+`icmpv6`, TCP logging, and descriptions. Explicit native destinations do not
+require `--allow-private-cidr`; that guard applies to DNS answers.
+
+If the foundation has global ASGs and `defaults` doesn't match their normalized
+destination rules and lifecycle assignments, the utility exits nonzero and
+prints a copyable `defaults:` block to stdout. Use that block for the cutover.
+Add any global grants that explicit org `allow` lists still need, including
+DNS and staging dependencies.
+
+With matching defaults, dry-run previews the replacement and cutover. Apply
+reconciles the replacement space bindings first and disables the old global
+bindings only after reconciliation succeeds. The original ASGs and their
+explicit space bindings remain. If disabling multiple global ASGs fails partway
+through, rerun with the original defaults. The temporary, unbound
+`cdas-migration-baseline` ASG records the original grants and is removed after
+the cutover succeeds.
+
+## Authentication and execution
 
 Set `CF_API` to the foundation's HTTPS API root. Set `CF_USERNAME` and
 `CF_PASSWORD` to a user and password, or to a UAA client ID and secret when using
@@ -24,8 +57,10 @@ destinations. Loopback and link-local addresses are never permitted.
 
 ## Reconciliation
 
-- The utility computes the **minimum** number of managed ASGs for each org's
-  current spaces. A missing configured space or exhausted solver budget aborts
+- The utility computes the **minimum** number of ASGs needed across managed
+  staging and running bindings, with protected groups treated as fixed. Groups
+  can serve spaces in several orgs. Without `defaults`, unlisted orgs remain
+  out of scope. A missing configured space or exhausted solver budget aborts
   before writing.
 - A DNS error or empty answer leaves the affected org's existing ASGs and space
   bindings intact. Healthy orgs can still sync, and the command exits nonzero so
@@ -36,10 +71,16 @@ destinations. Loopback and link-local addresses are never permitted.
   failure, the utility reports any previously applied IPs it can find in the
   org's currently bound managed ASGs. This records the applied rules, not a
   time series of DNS answers. Older ASGs get descriptions on a successful sync.
-- Managed ASGs have content-addressed names under the reserved
-  `cf-dns-asg-sync-` prefix. Do not edit or bind these groups manually. An ASG that
-  is global or bound outside its owning org blocks reconciliation. Other groups
-  and unlisted orgs are untouched. Bindings are for the running lifecycle.
+- New managed ASGs use short opaque `cdas-` names. The utility fingerprints
+  rules in memory from the CAPI snapshot and compares normalized rules before
+  reuse, including unbound groups left by interrupted runs. Existing
+  `cf-dns-asg-sync-` groups can be reused under their original names, and
+  redundant groups are retired once no bindings need them. Reserve both naming
+  formats for the utility.
+- A group with a binding outside the current healthy scope keeps that binding
+  and its rules and descriptions. The utility may still adjust bindings in
+  healthy managed spaces. Independently managed groups remain untouched except
+  for disabling global bindings during a matching-defaults migration.
 - The sync adds replacement coverage before revoking old coverage. Changes are
   not atomic: a failed run can leave old grants until a later run completes.
 - New spaces inherit the org policy on the next successful run. Already-running
@@ -54,7 +95,7 @@ Use [`ci/pipeline.yml`](ci/pipeline.yml) with `source_uri`, `source_branch`,
 (`"true"` initially). Put `policy.yml` at the root of the policy repo. Supply
 `cf-api`, `cf-client-id`, and `cf-client-secret` through the credential manager.
 Select workers whose task containers see the same DNS view as apps and can
-reach CAPI and UAA. Run one writer per foundation and org. The example task uses
+reach CAPI and UAA. Run one writer per foundation. The example task uses
 IPv4 and public destinations; add flags in `ci/sync.yml` for private or IPv6 use.
 
 ## Develop

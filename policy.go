@@ -21,7 +21,8 @@ type Resolver interface {
 }
 
 type Policy struct {
-	Orgs []Org `yaml:"orgs"`
+	Defaults []Grant `yaml:"defaults"`
+	Orgs     []Org   `yaml:"orgs"`
 }
 
 type Org struct {
@@ -36,9 +37,15 @@ type SpacePolicy struct {
 }
 
 type Grant struct {
-	Hostname string   `yaml:"hostname"`
-	Protocol string   `yaml:"protocol"`
-	Ports    []uint16 `yaml:"ports"`
+	Hostname    string   `yaml:"hostname"`
+	Destination string   `yaml:"destination"`
+	Protocol    string   `yaml:"protocol"`
+	Ports       PortSpec `yaml:"ports"`
+	Type        *int     `yaml:"type"`
+	Code        *int     `yaml:"code"`
+	Log         bool     `yaml:"log"`
+	Description string   `yaml:"description"`
+	Lifecycles  []string `yaml:"lifecycles"`
 }
 
 type DNSOptions struct {
@@ -50,14 +57,20 @@ type Rule struct {
 	Destination string
 	Protocol    string
 	Port        uint16
+	PortEnd     uint16 `json:",omitempty"`
+	Type        int    `json:",omitempty"`
+	Code        int    `json:",omitempty"`
+	Log         bool   `json:",omitempty"`
 }
 
 type ResolvedOrg struct {
-	Name         string
-	Baseline     []Rule
-	Extras       map[string][]Rule
-	Descriptions RuleDescriptions
-	DNSFailures  map[string]error
+	Name            string
+	Baseline        []Rule
+	Extras          map[string][]Rule
+	Descriptions    RuleDescriptions
+	DNSFailures     map[string]error
+	StagingBaseline []Rule
+	StagingExtras   map[string][]Rule
 }
 
 // RuleDescriptions records comma-separated source hostnames independently of
@@ -76,7 +89,18 @@ func normalize(rules []Rule) []Rule {
 		if n := strings.Compare(a.Protocol, b.Protocol); n != 0 {
 			return n
 		}
-		return int(a.Port) - int(b.Port)
+		for _, n := range []int{int(a.Port) - int(b.Port), int(a.PortEnd) - int(b.PortEnd), a.Type - b.Type, a.Code - b.Code} {
+			if n != 0 {
+				return n
+			}
+		}
+		if a.Log != b.Log {
+			if a.Log {
+				return 1
+			}
+			return -1
+		}
+		return 0
 	})
 	return slices.Compact(rules)
 }
@@ -94,8 +118,11 @@ func ParsePolicy(r io.Reader) (Policy, error) {
 	if err := d.Decode(&extra); !errors.Is(err, io.EOF) {
 		return Policy{}, fmt.Errorf("policy must contain exactly one YAML document")
 	}
-	if len(policy.Orgs) == 0 {
-		return Policy{}, fmt.Errorf("policy must list at least one org")
+	if len(policy.Orgs) == 0 && policy.Defaults == nil {
+		return Policy{}, fmt.Errorf("policy must list at least one org or set defaults")
+	}
+	if err := validateGrants(policy.Defaults); err != nil {
+		return Policy{}, fmt.Errorf("defaults: %w", err)
 	}
 	orgNames := map[string]bool{}
 	for i := range policy.Orgs {
@@ -132,28 +159,54 @@ func checkName(name string, seen map[string]bool) error {
 }
 
 func validateGrants(grants []Grant) error {
-	for i := range grants {
-		g := &grants[i]
-		h := strings.ToLower(strings.TrimSuffix(g.Hostname, "."))
-		labels := strings.Split(h, ".")
-		_, ipErr := netip.ParseAddr(h)
-		if len(h) > 253 || len(labels) < 2 || ipErr == nil {
-			return fmt.Errorf("expected a fully qualified hostname, got %q", g.Hostname)
-		}
-		for _, label := range labels {
-			if !dnsLabel.MatchString(label) {
-				return fmt.Errorf("invalid hostname %q", g.Hostname)
-			}
-		}
-		g.Hostname = h + "."
-		if g.Protocol != "tcp" && g.Protocol != "udp" {
-			return fmt.Errorf("%s: protocol must be tcp or udp", h)
-		}
-		if len(g.Ports) == 0 || slices.Contains(g.Ports, 0) {
-			return fmt.Errorf("%s: specify ports between 1 and 65535", h)
+	for _, g := range grants {
+		if _, _, err := deriveGrant(g); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func deriveGrant(g Grant) (Grant, []Rule, error) {
+	if g.Lifecycles == nil {
+		g.Lifecycles = []string{"running", "staging"}
+	}
+	seen := map[string]bool{}
+	for _, life := range g.Lifecycles {
+		if (life != "running" && life != "staging") || seen[life] {
+			return g, nil, fmt.Errorf("invalid or duplicate lifecycle %q", life)
+		}
+		seen[life] = true
+	}
+	if len(g.Lifecycles) == 0 {
+		return g, nil, fmt.Errorf("lifecycles must not be empty")
+	}
+	if g.Destination != "" {
+		if g.Hostname != "" {
+			return g, nil, fmt.Errorf("specify hostname or destination, not both")
+		}
+		rules, err := destinationRules(g.Destination, g.Protocol, g.Ports, g.Type, g.Code, g.Log)
+		return g, rules, err
+	}
+	h := strings.ToLower(strings.TrimSuffix(g.Hostname, "."))
+	labels := strings.Split(h, ".")
+	_, ipErr := netip.ParseAddr(h)
+	if len(h) > 253 || len(labels) < 2 || ipErr == nil {
+		return g, nil, fmt.Errorf("expected a fully qualified hostname, got %q", g.Hostname)
+	}
+	for _, label := range labels {
+		if !dnsLabel.MatchString(label) {
+			return g, nil, fmt.Errorf("invalid hostname %q", g.Hostname)
+		}
+	}
+	g.Hostname = h + "."
+	if g.Protocol != "tcp" && g.Protocol != "udp" {
+		return g, nil, fmt.Errorf("%s: protocol must be tcp or udp", h)
+	}
+	if len(g.Ports) == 0 || g.Type != nil || g.Code != nil || g.Log || g.Description != "" {
+		return g, nil, fmt.Errorf("%s: hostname rules require ports and use generated descriptions", h)
+	}
+	return g, nil, nil
 }
 
 func Resolve(ctx context.Context, policy Policy, resolver Resolver, opts DNSOptions) ([]ResolvedOrg, error) {
@@ -162,11 +215,31 @@ func Resolve(ctx context.Context, policy Policy, resolver Resolver, opts DNSOpti
 		err error
 	}
 	cache := map[string]lookup{}
-	resolve := func(org *ResolvedOrg, grants []Grant) ([]Rule, error) {
-		var rules []Rule
-		for _, g := range grants {
+	resolve := func(org *ResolvedOrg, grants []Grant) (running, staging []Rule, err error) {
+		for _, grant := range grants {
 			if err := ctx.Err(); err != nil {
-				return nil, err
+				return nil, nil, err
+			}
+			g, native, err := deriveGrant(grant)
+			if err != nil {
+				return nil, nil, err
+			}
+			add := func(rule Rule, description string) {
+				if slices.Contains(g.Lifecycles, "running") {
+					running = append(running, rule)
+				}
+				if slices.Contains(g.Lifecycles, "staging") {
+					staging = append(staging, rule)
+				}
+				if description != "" {
+					org.Descriptions[rule] = mergeDescriptions(org.Descriptions[rule], description)
+				}
+			}
+			if g.Destination != "" {
+				for _, rule := range native {
+					add(rule, g.Description)
+				}
+				continue
 			}
 			result, ok := cache[g.Hostname]
 			if !ok {
@@ -178,7 +251,7 @@ func Resolve(ctx context.Context, policy Policy, resolver Resolver, opts DNSOpti
 				answers, err := resolver.LookupNetIP(lookupCtx, family, g.Hostname)
 				cancel()
 				if err := ctx.Err(); err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				if err != nil {
 					answers = nil
@@ -190,7 +263,7 @@ func Resolve(ctx context.Context, policy Policy, resolver Resolver, opts DNSOpti
 						continue
 					}
 					if !addr.IsGlobalUnicast() || addr.Zone() != "" || (restricted(addr) && !slices.ContainsFunc(opts.PrivateCIDRs, func(p netip.Prefix) bool { return p.Contains(addr) })) {
-						return nil, fmt.Errorf("%s resolved to disallowed address %s", g.Hostname, addr)
+						return nil, nil, fmt.Errorf("%s resolved to disallowed address %s", g.Hostname, addr)
 					}
 					result.ips = append(result.ips, addr)
 				}
@@ -205,33 +278,38 @@ func Resolve(ctx context.Context, policy Policy, resolver Resolver, opts DNSOpti
 			}
 			for _, ip := range result.ips {
 				for _, port := range g.Ports {
-					rule := Rule{ip.String(), g.Protocol, port}
-					rules = append(rules, rule)
-					host := strings.TrimSuffix(g.Hostname, ".")
-					org.Descriptions[rule] = mergeDescriptions(org.Descriptions[rule], host)
+					rule := Rule{Destination: ip.String(), Protocol: g.Protocol, Port: port.start, PortEnd: port.end}
+					add(rule, strings.TrimSuffix(g.Hostname, "."))
 				}
 			}
 		}
-		return normalize(rules), nil
+		return normalize(running), normalize(staging), nil
 	}
 	var orgs []ResolvedOrg
 	for _, o := range policy.Orgs {
-		org := ResolvedOrg{Name: o.Name, Extras: map[string][]Rule{}, Descriptions: RuleDescriptions{}, DNSFailures: map[string]error{}}
-		base, err := resolve(&org, o.Allow)
+		org := ResolvedOrg{Name: o.Name, Extras: map[string][]Rule{}, StagingExtras: map[string][]Rule{}, Descriptions: RuleDescriptions{}, DNSFailures: map[string]error{}}
+		grants := o.Allow
+		if grants == nil {
+			grants = policy.Defaults
+		}
+		base, stage, err := resolve(&org, grants)
 		if err != nil {
 			return nil, fmt.Errorf("org %q: %w", o.Name, err)
 		}
 		org.Baseline = base
+		org.StagingBaseline = stage
 		for _, s := range o.Spaces {
-			rules, err := resolve(&org, s.Allow)
+			rules, stage, err := resolve(&org, s.Allow)
 			if err != nil {
 				return nil, fmt.Errorf("org %q space %q: %w", o.Name, s.Name, err)
 			}
 			org.Extras[s.Name] = rules
+			org.StagingExtras[s.Name] = stage
 		}
 		if len(org.DNSFailures) > 0 {
 			// No partial policy can be applied for this org.
 			org.Baseline, org.Extras, org.Descriptions = nil, nil, nil
+			org.StagingBaseline, org.StagingExtras = nil, nil
 		}
 		orgs = append(orgs, org)
 	}

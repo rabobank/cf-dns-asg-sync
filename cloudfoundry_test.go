@@ -1,10 +1,12 @@
 package asgsync
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -12,6 +14,29 @@ import (
 )
 
 var _ = Describe("Cloud Foundry client", func() {
+	It("encodes native ASG rules for CAPI without changing their grants", func() {
+		policy, err := ParsePolicy(strings.NewReader(`orgs:
+  - name: payments
+    allow:
+      - {destination: 0.0.0.0-9.255.255.255, protocol: all}
+      - {destination: '10.0.0.0/24,10.0.1.1', protocol: udp, ports: '53'}
+      - {destination: 192.0.2.1, protocol: tcp, ports: '8000-8100', log: true, description: lab}
+      - {destination: 192.0.2.1, protocol: icmp, type: 0, code: -1}
+`))
+		Expect(err).NotTo(HaveOccurred())
+		orgs, err := Resolve(context.Background(), policy, nil, DNSOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		org := orgs[0]
+		data, err := json.Marshal(securityGroupRules(org.Baseline, org.Descriptions))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(data).To(MatchJSON(`[
+  {"destination":"0.0.0.0-9.255.255.255","protocol":"all"},
+  {"destination":"10.0.0.0/24","protocol":"udp","ports":"53"},
+  {"destination":"10.0.1.1","protocol":"udp","ports":"53"},
+  {"destination":"192.0.2.1","protocol":"icmp","type":0,"code":-1},
+  {"destination":"192.0.2.1","protocol":"tcp","ports":"8000-8100","log":true,"description":"lab"}
+]`))
+	})
 	DescribeTable("uses SDK discovery and obtains the selected OAuth grant",
 		func(ctx SpecContext, useClientCredentials bool) {
 			var tokenCalls atomic.Int32
@@ -59,7 +84,18 @@ var _ = Describe("Cloud Foundry client", func() {
 					}
 					fmt.Fprint(w, `{"guid":"group-guid"}`)
 				case "GET /v3/security_groups":
-					fmt.Fprint(w, `{"pagination":{"total_pages":1},"resources":[{"guid":"group-guid","name":"cf-dns-asg-sync-example","globally_enabled":{"running":false,"staging":false},"relationships":{"running_spaces":{"data":[{"guid":"dev-guid"}]},"staging_spaces":{"data":[]}},"rules":[{"destination":"192.0.2.1","ports":"443,9443","protocol":"tcp","description":"a.example.org,b.example.org"},{"destination":"192.0.2.1","ports":"8443","protocol":"tcp","description":"a.example.org"}]}]}`)
+					fmt.Fprint(w, `{"pagination":{"total_pages":1},"resources":[{"guid":"group-guid","name":"cdas-aaaaaaaaaaaaa","globally_enabled":{"running":false,"staging":false},"relationships":{"running_spaces":{"data":[{"guid":"dev-guid"}]},"staging_spaces":{"data":[]}},"rules":[{"destination":"192.0.2.1","ports":"443,9443","protocol":"tcp","description":"a.example.org,b.example.org"},{"destination":"192.0.2.1","ports":"8443","protocol":"tcp","description":"a.example.org"}]},{"guid":"global-guid","name":"public_networks","globally_enabled":{"running":false,"staging":true},"rules":[{"destination":"0.0.0.0-9.255.255.255","protocol":"all"}]}]}`)
+				case "PATCH /v3/security_groups/global-guid":
+					var body map[string]map[string]bool
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body) != 1 || len(body["globally_enabled"]) != 1 {
+						http.Error(w, "expected only the global flag update", 400)
+						return
+					}
+					if value, ok := body["globally_enabled"]["staging"]; !ok || value {
+						http.Error(w, "expected staging false", 400)
+						return
+					}
+					fmt.Fprint(w, `{"guid":"global-guid"}`)
 				default:
 					http.NotFound(w, r)
 				}
@@ -76,7 +112,7 @@ var _ = Describe("Cloud Foundry client", func() {
 			spaces, err := cf.ListSpaces(ctx, org)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(spaces).To(Equal([]Space{{Name: "dev", GUID: "dev-guid"}}))
-			a, b, c := Rule{"192.0.2.1", "tcp", 443}, Rule{"192.0.2.1", "tcp", 8443}, Rule{"192.0.2.1", "tcp", 9443}
+			a, b, c := Rule{Destination: "192.0.2.1", Protocol: "tcp", Port: 443}, Rule{Destination: "192.0.2.1", Protocol: "tcp", Port: 8443}, Rule{Destination: "192.0.2.1", Protocol: "tcp", Port: 9443}
 			rules := []Rule{a, b, c, a}
 			descriptions := RuleDescriptions{a: "a.example.org,b.example.org", b: "a.example.org", c: "a.example.org,b.example.org"}
 			id, err := cf.CreateGroup(ctx, "example", rules, descriptions)
@@ -85,11 +121,17 @@ var _ = Describe("Cloud Foundry client", func() {
 			Expect(cf.UpdateGroupDescriptions(ctx, id, rules, descriptions)).To(Succeed())
 			groups, err := cf.ListGroups(ctx)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(groups).To(HaveLen(1))
+			Expect(groups).To(HaveLen(2))
 			Expect(groups[0].Unsupported).To(BeFalse())
 			Expect(groups[0].Running).To(Equal([]string{"dev-guid"}))
 			Expect(groups[0].Rules).To(ConsistOf(a, b, c))
 			Expect(groups[0].Descriptions).To(Equal(descriptions))
+			Expect(groups[1].Name).To(Equal("public_networks"))
+			Expect(groups[1].Unsupported).To(BeFalse())
+			Expect(groups[1].GlobalStaging).To(BeTrue())
+			Expect(groups[1].GlobalRunning).To(BeFalse())
+			Expect(groups[1].Rules).To(Equal([]Rule{{Destination: "0.0.0.0-9.255.255.255", Protocol: "all"}}))
+			Expect(cf.DisableGlobalGroup(ctx, groups[1].GUID, false, true)).To(Succeed())
 			Expect(tokenCalls.Load()).To(Equal(int32(1)))
 		},
 		Entry("password grant", false),
