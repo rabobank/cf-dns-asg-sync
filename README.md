@@ -1,6 +1,6 @@
 # cf-dns-asg-sync
 
-Sync Cloud Foundry egress rules from DNS allowlists, one org at a time.
+Sync Cloud Foundry egress rules from DNS allowlists and share ASGs across managed spaces.
 
 ## Use it
 
@@ -57,9 +57,11 @@ destinations. Loopback and link-local addresses are never permitted.
 
 ## Reconciliation
 
-- The utility computes the **minimum** number of managed ASGs per org across
-  staging and running bindings for the normalized rules. A missing configured
-  space or exhausted solver budget aborts before writing.
+- The utility computes the **minimum** number of ASGs needed across managed
+  staging and running bindings, with protected groups treated as fixed. Groups
+  can serve spaces in several orgs. Without `defaults`, unlisted orgs remain
+  out of scope. A missing configured space or exhausted solver budget aborts
+  before writing.
 - A DNS error or empty answer leaves the affected org's existing ASGs and space
   bindings intact. Healthy orgs can still sync, and the command exits nonzero so
   Concourse reports the failure. A first-run failure adds no grants.
@@ -69,11 +71,16 @@ destinations. Loopback and link-local addresses are never permitted.
   failure, the utility reports any previously applied IPs it can find in the
   org's currently bound managed ASGs. This records the applied rules, not a
   time series of DNS answers. Older ASGs get descriptions on a successful sync.
-- Managed ASGs have content-addressed names under the reserved
-  `cf-dns-asg-sync-` prefix. Do not edit or bind these groups manually. An ASG that
-  is global or bound outside its owning org blocks reconciliation. The utility
-  does not modify independently managed groups except to disable global
-  bindings during a matching-defaults migration.
+- New managed ASGs use short opaque `cdas-` names. The utility fingerprints
+  rules in memory from the CAPI snapshot and compares normalized rules before
+  reuse, including unbound groups left by interrupted runs. Existing
+  `cf-dns-asg-sync-` groups can be reused under their original names, and
+  redundant groups are retired once no bindings need them. Reserve both naming
+  formats for the utility.
+- A group with a binding outside the current healthy scope keeps that binding
+  and its rules and descriptions. The utility may still adjust bindings in
+  healthy managed spaces. Independently managed groups remain untouched except
+  for disabling global bindings during a matching-defaults migration.
 - The sync adds replacement coverage before revoking old coverage. Changes are
   not atomic: a failed run can leave old grants until a later run completes.
 - New spaces inherit the org policy on the next successful run. Already-running
@@ -88,7 +95,7 @@ Use [`ci/pipeline.yml`](ci/pipeline.yml) with `source_uri`, `source_branch`,
 (`"true"` initially). Put `policy.yml` at the root of the policy repo. Supply
 `cf-api`, `cf-client-id`, and `cf-client-secret` through the credential manager.
 Select workers whose task containers see the same DNS view as apps and can
-reach CAPI and UAA. Run one writer per foundation and org. The example task uses
+reach CAPI and UAA. Run one writer per foundation. The example task uses
 IPv4 and public destinations; add flags in `ci/sync.yml` for private or IPv6 use.
 
 ## Develop

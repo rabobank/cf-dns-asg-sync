@@ -44,7 +44,7 @@ func matchesGlobalDefaults(defaults []Grant, groups []SecurityGroup) bool {
 	}
 	expected, actual := map[lifecycleRule]bool{}, map[lifecycleRule]bool{}
 	for _, g := range groups {
-		if g.Unsupported || g.GUID == "" || strings.HasPrefix(g.Name, namePrefix) {
+		if g.Unsupported || g.GUID == "" || managedGroupName(g.Name) {
 			return false
 		}
 		for _, rule := range g.Rules {

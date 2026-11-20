@@ -3,7 +3,6 @@ package asgsync
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,11 +40,8 @@ type SecurityGroup struct {
 
 func (g SecurityGroup) global() bool { return g.GlobalRunning || g.GlobalStaging }
 
-const namePrefix = "cf-dns-asg-sync-"
-
 type targetGroup struct {
 	name         string
-	org          string
 	rules        []Rule
 	descriptions RuleDescriptions
 	update       bool
@@ -56,6 +52,7 @@ type targetGroup struct {
 
 type binding struct {
 	Space
+	org       string
 	lifecycle string
 }
 
@@ -117,10 +114,6 @@ func ruleKey(rules []Rule) string {
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
-func orgPrefix(guid string) string {
-	return fmt.Sprintf("%s%x-", namePrefix, sha256.Sum256([]byte(guid)))
-}
-
 func Reconcile(ctx context.Context, cf Foundation, orgs []ResolvedOrg, dryRun bool, out io.Writer) error {
 	groups, err := loadGroups(ctx, cf)
 	if err != nil {
@@ -141,18 +134,36 @@ func loadGroups(ctx context.Context, cf Foundation) ([]SecurityGroup, error) {
 }
 
 func reconcile(ctx context.Context, cf Foundation, orgs []ResolvedOrg, groups []SecurityGroup, dryRun bool, out io.Writer) error {
-	var actions []targetGroup
 	var failures []error
 	for _, org := range orgs {
 		if len(org.DNSFailures) > 0 {
 			failures = append(failures, describeDNSFailures(ctx, cf, org, groups))
 			continue
 		}
-		plan, err := planOrg(ctx, cf, org, groups)
+		guid, spaces, err := discoverOrg(ctx, cf, org)
 		if err != nil {
 			return errors.Join(errors.Join(failures...), fmt.Errorf("org %q: %w", org.Name, err))
+	policies := map[string][]Rule{}
+	bindings := map[string]binding{}
+	provenance := map[string]RuleDescriptions{}
+	legacyOwners := map[string]bool{}
+	orgIDs := map[string]bool{}
 		}
-		actions = append(actions, plan...)
+		if orgIDs[guid] {
+			return fmt.Errorf("duplicate org GUID %s", guid)
+		}
+		orgIDs[guid] = true
+		legacyOwners[legacyOrgKey(guid)] = true
+		provenance[org.Name] = org.Descriptions
+		for _, s := range spaces {
+			running, staging := binding{s, org.Name, "running"}, binding{s, org.Name, "staging"}
+			if _, ok := bindings[running.key()]; ok {
+				return fmt.Errorf("duplicate space GUID %s", s.GUID)
+			}
+			bindings[running.key()], bindings[staging.key()] = running, staging
+			policies[running.key()] = org.RulesFor(s.Name)
+			policies[staging.key()] = normalize(append(slices.Clone(org.StagingBaseline), org.StagingExtras[s.Name]...))
+		}
 	}
 	dnsErr := errors.Join(failures...)
 	return errors.Join(dnsErr, applyActions(ctx, cf, actions, dryRun, out, dnsErr != nil))
@@ -162,6 +173,10 @@ func describeDNSFailures(ctx context.Context, cf Foundation, org ResolvedOrg, gr
 	guid, err := cf.FindOrg(ctx, org.Name)
 	if guid == "" && err == nil {
 		err = errors.New("empty org GUID")
+	}
+	actions, err := planFoundation(ctx, groups, policies, bindings, provenance, legacyOwners, dnsErr != nil)
+	if err != nil {
+		return errors.Join(dnsErr, err)
 	}
 	var spaces []Space
 	if err == nil {
@@ -176,9 +191,8 @@ func describeDNSFailures(ctx context.Context, cf Foundation, org ResolvedOrg, gr
 	if err != nil {
 		diagnostics = append(diagnostics, fmt.Errorf("org %q: could not read DNS history: %w", org.Name, err))
 	} else {
-		prefix := orgPrefix(guid)
 		for _, g := range groups {
-			if !managedName(g.Name, prefix) || g.global() || g.Unsupported || len(g.Running)+len(g.Staging) == 0 || g.Name != prefix+ruleKey(g.Rules) || slices.ContainsFunc(g.Running, func(id string) bool { return !inOrg[id] }) || slices.ContainsFunc(g.Staging, func(id string) bool { return !inOrg[id] }) {
+			if !managedGroupName(g.Name) || !validManagedRules(g) || g.global() || g.Unsupported || !(slices.ContainsFunc(g.Running, func(id string) bool { return inOrg[id] }) || slices.ContainsFunc(g.Staging, func(id string) bool { return inOrg[id] })) {
 				continue
 			}
 			for _, rule := range g.Rules {
@@ -211,7 +225,7 @@ func applyActions(ctx context.Context, cf Foundation, actions []targetGroup, dry
 	}
 	for _, a := range actions {
 		if a.update {
-			if _, err := fmt.Fprintf(out, "%s update DNS descriptions for ASG %s\n", a.org, a.name); err != nil {
+			if _, err := fmt.Fprintf(out, "update DNS descriptions for ASG %s\n", a.name); err != nil {
 				return err
 			}
 		}
@@ -220,7 +234,7 @@ func applyActions(ctx context.Context, cf Foundation, actions []targetGroup, dry
 			if a.retire {
 				verb = "delete"
 			}
-			if _, err := fmt.Fprintf(out, "%s %s ASG %s (%d grants)\n", a.org, verb, a.name, len(a.rules)); err != nil {
+			if _, err := fmt.Fprintf(out, "%s ASG %s (%d grants)\n", verb, a.name, len(a.rules)); err != nil {
 				return err
 			}
 			for _, rule := range a.rules {
@@ -230,12 +244,12 @@ func applyActions(ctx context.Context, cf Foundation, actions []targetGroup, dry
 			}
 		}
 		for _, s := range a.bind {
-			if _, err := fmt.Fprintf(out, "%s bind %s to %s (%s)\n", a.org, a.name, s.Name, s.lifecycle); err != nil {
+			if _, err := fmt.Fprintf(out, "%s bind %s to %s (%s)\n", s.org, a.name, s.Name, s.lifecycle); err != nil {
 				return err
 			}
 		}
 		for _, s := range a.unbind {
-			if _, err := fmt.Fprintf(out, "%s unbind %s from %s (%s)\n", a.org, a.name, s.Name, s.lifecycle); err != nil {
+			if _, err := fmt.Fprintf(out, "%s unbind %s from %s (%s)\n", s.org, a.name, s.Name, s.lifecycle); err != nil {
 				return err
 			}
 		}
@@ -243,8 +257,8 @@ func applyActions(ctx context.Context, cf Foundation, actions []targetGroup, dry
 	if dryRun {
 		return nil
 	}
-	// Publish new coverage before removing old coverage. Content-addressed names
-	// let the next run resume after an interruption without creating duplicates.
+	// Publish coverage before removing it. An ambiguous create aborts this run;
+	// the next run reads a fresh snapshot, including any unbound ASGs.
 	for _, a := range actions {
 		id := a.current.GUID
 		if id == "" {
@@ -300,113 +314,33 @@ func applyActions(ctx context.Context, cf Foundation, actions []targetGroup, dry
 	return nil
 }
 
-func planOrg(ctx context.Context, cf Foundation, org ResolvedOrg, groups []SecurityGroup) ([]targetGroup, error) {
+func discoverOrg(ctx context.Context, cf Foundation, org ResolvedOrg) (string, []Space, error) {
 	guid, err := cf.FindOrg(ctx, org.Name)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	if guid == "" {
-		return nil, fmt.Errorf("empty org GUID")
+		return "", nil, fmt.Errorf("empty org GUID")
 	}
 	spaces, err := cf.ListSpaces(ctx, guid)
 	if err != nil {
-		return nil, fmt.Errorf("list spaces: %w", err)
+		return "", nil, fmt.Errorf("list spaces: %w", err)
 	}
-	byGUID := map[string]Space{}
+	byGUID := map[string]bool{}
 	byName := map[string]bool{}
-	policies := map[string][]Rule{}
-	bindings := map[string]binding{}
 	for _, s := range spaces {
-		if s.GUID == "" || s.Name == "" || byGUID[s.GUID].GUID != "" || byName[s.Name] {
-			return nil, fmt.Errorf("invalid or duplicate space %q (%s)", s.Name, s.GUID)
+		if s.GUID == "" || s.Name == "" || byGUID[s.GUID] || byName[s.Name] {
+			return "", nil, fmt.Errorf("invalid or duplicate space %q (%s)", s.Name, s.GUID)
 		}
-		byGUID[s.GUID] = s
+		byGUID[s.GUID] = true
 		byName[s.Name] = true
-		running, staging := binding{s, "running"}, binding{s, "staging"}
-		bindings[running.key()], bindings[staging.key()] = running, staging
-		policies[running.key()] = org.RulesFor(s.Name)
-		policies[staging.key()] = normalize(append(slices.Clone(org.StagingBaseline), org.StagingExtras[s.Name]...))
 	}
 	for name := range org.Extras {
 		if !byName[name] {
-			return nil, fmt.Errorf("unknown space %q", name)
+			return "", nil, fmt.Errorf("unknown space %q", name)
 		}
 	}
-	prefix := orgPrefix(guid)
-	managed := map[string]SecurityGroup{}
-	var existing []Group
-	ordered := slices.Clone(groups)
-	slices.SortFunc(ordered, func(a, b SecurityGroup) int { return strings.Compare(a.Name, b.Name) })
-	for _, g := range ordered {
-		if !managedName(g.Name, prefix) {
-			continue
-		}
-		if g.global() {
-			return nil, fmt.Errorf("managed ASG %s is globally enabled", g.Name)
-		}
-		for _, id := range append(slices.Clone(g.Running), g.Staging...) {
-			if _, ok := byGUID[id]; !ok {
-				return nil, fmt.Errorf("managed ASG %s has a binding outside the org: %s", g.Name, id)
-			}
-		}
-		if g.GUID == "" || managed[g.Name].GUID != "" || g.Unsupported || g.Name != prefix+ruleKey(g.Rules) {
-			return nil, fmt.Errorf("managed ASG %s has invalid identity or rules", g.Name)
-		}
-		managed[g.Name] = g
-		existing = append(existing, Group{Rules: normalize(slices.Clone(g.Rules)), Spaces: currentBindings(g)})
-	}
-	desired, err := Minimize(ctx, policies, existing)
-	if err != nil {
-		return nil, err
-	}
-	var actions []targetGroup
-	for _, g := range desired {
-		name := prefix + ruleKey(g.Rules)
-		current := managed[name]
-		delete(managed, name)
-		a := targetGroup{name: name, org: org.Name, rules: g.Rules, current: current}
-		a.descriptions = RuleDescriptions{}
-		for _, r := range g.Rules {
-			if d := org.Descriptions[r]; d != "" {
-				a.descriptions[r] = d
-			}
-		}
-		a.update = current.GUID != "" && !maps.Equal(a.descriptions, current.Descriptions)
-		bound := currentBindings(current)
-		for _, id := range g.Spaces {
-			if !slices.Contains(bound, id) {
-				a.bind = append(a.bind, bindings[id])
-			}
-		}
-		for _, id := range bound {
-			if !slices.Contains(g.Spaces, id) {
-				a.unbind = append(a.unbind, bindings[id])
-			}
-		}
-		if current.GUID == "" || a.update || len(a.bind)+len(a.unbind) > 0 {
-			actions = append(actions, a)
-		}
-	}
-	for _, g := range ordered {
-		if _, ok := managed[g.Name]; !ok {
-			continue
-		}
-		a := targetGroup{name: g.Name, org: org.Name, rules: g.Rules, current: g, retire: true}
-		for _, id := range currentBindings(g) {
-			a.unbind = append(a.unbind, bindings[id])
-		}
-		actions = append(actions, a)
-	}
-	return actions, nil
-}
-
-func managedName(name, prefix string) bool {
-	suffix, ok := strings.CutPrefix(name, prefix)
-	if !ok || len(suffix) != 64 {
-		return false
-	}
-	_, err := hex.DecodeString(suffix)
-	return err == nil
+	return guid, spaces, nil
 }
 
 func sortedUnique(values []string) []string {

@@ -33,6 +33,13 @@ type candidate struct {
 // so all maximal rectangles suffice to prove the minimum. Valid existing rectangles
 // are also candidates, so ties can preserve their bindings.
 func Minimize(ctx context.Context, policies map[string][]Rule, existing []Group) ([]Group, error) {
+	return minimize(ctx, policies, existing, nil)
+}
+
+// minimize takes coverage from protected groups as already paid for. Candidate
+// generation still uses the full policies: a new group may also cover an edge
+// served by a protected group if that lets it cover other spaces safely.
+func minimize(ctx context.Context, policies map[string][]Rule, existing, fixed []Group) ([]Group, error) {
 	spaces := slices.Sorted(maps.Keys(policies))
 	spaceIDs := map[string]int{}
 	var allRules []Rule
@@ -168,7 +175,15 @@ func Minimize(ctx context.Context, policies map[string][]Rule, existing []Group)
 			cover(g, bindingCost(g))
 		}
 	}
-	return minimumCover(ctx, candidates, edgeCount)
+	covered := new(big.Int)
+	for _, g := range fixed {
+		for _, s := range g.Spaces {
+			for _, r := range g.Rules {
+				covered.SetBit(covered, edges[spaceIDs[s]][ids[r]], 1)
+			}
+		}
+	}
+	return minimumCover(ctx, candidates, edgeCount, covered)
 }
 
 func setBits(mask *big.Int) []int {
@@ -182,7 +197,7 @@ func setBits(mask *big.Int) []int {
 	return result
 }
 
-func minimumCover(ctx context.Context, candidates []candidate, count int) ([]Group, error) {
+func minimumCover(ctx context.Context, candidates []candidate, count int, initial *big.Int) ([]Group, error) {
 	byEdge := make([][]int, count)
 	for i, c := range candidates {
 		for _, edge := range setBits(c.cover) {
@@ -221,7 +236,7 @@ func minimumCover(ctx context.Context, candidates []candidate, count int) ([]Gro
 		}
 		if edge == -1 {
 			if best == nil || len(path) < len(best) || (len(path) == len(best) && cost < bestCost) {
-				best = slices.Clone(path)
+				best = append(make([]int, 0, len(path)), path...)
 				bestCost = cost
 			}
 			return nil
@@ -247,7 +262,7 @@ func minimumCover(ctx context.Context, candidates []candidate, count int) ([]Gro
 		}
 		return nil
 	}
-	if err := search(new(big.Int), nil, 0); err != nil {
+	if err := search(initial, nil, 0); err != nil {
 		return nil, err
 	}
 	if best == nil {

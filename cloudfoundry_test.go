@@ -84,7 +84,7 @@ var _ = Describe("Cloud Foundry client", func() {
 					}
 					fmt.Fprint(w, `{"guid":"group-guid"}`)
 				case "GET /v3/security_groups":
-					fmt.Fprint(w, `{"pagination":{"total_pages":1},"resources":[{"guid":"group-guid","name":"cf-dns-asg-sync-example","globally_enabled":{"running":false,"staging":false},"relationships":{"running_spaces":{"data":[{"guid":"dev-guid"}]},"staging_spaces":{"data":[]}},"rules":[{"destination":"192.0.2.1","ports":"443,9443","protocol":"tcp","description":"a.example.org,b.example.org"},{"destination":"192.0.2.1","ports":"8443","protocol":"tcp","description":"a.example.org"}]},{"guid":"global-guid","name":"public_networks","globally_enabled":{"running":false,"staging":true},"rules":[{"destination":"0.0.0.0-9.255.255.255","protocol":"all"}]}]}`)
+					fmt.Fprint(w, `{"pagination":{"total_pages":1},"resources":[{"guid":"group-guid","name":"cdas-aaaaaaaaaaaaa","globally_enabled":{"running":false,"staging":false},"relationships":{"running_spaces":{"data":[{"guid":"dev-guid"}]},"staging_spaces":{"data":[]}},"rules":[{"destination":"192.0.2.1","ports":"443,9443","protocol":"tcp","description":"a.example.org,b.example.org"},{"destination":"192.0.2.1","ports":"8443","protocol":"tcp","description":"a.example.org"}]},{"guid":"global-guid","name":"public_networks","globally_enabled":{"running":false,"staging":true},"rules":[{"destination":"0.0.0.0-9.255.255.255","protocol":"all"}]}]}`)
 				case "PATCH /v3/security_groups/global-guid":
 					var body map[string]map[string]bool
 					if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body) != 1 || len(body["globally_enabled"]) != 1 {
