@@ -257,6 +257,25 @@ orgs:
 		Expect(cf.CreateGroupCallCount()).To(BeZero())
 	})
 
+	It("rejects an unknown staging-only override before changing existing bindings", func(ctx SpecContext) {
+		org.StagingBaseline = org.Baseline
+		cf.BindStagingCalls(func(_ context.Context, _ string, ids []string) error {
+			existing[0].Staging = append(existing[0].Staging, ids...)
+			return nil
+		})
+		Expect(sync.Reconcile(ctx, cf, []sync.ResolvedOrg{org}, false, io.Discard)).To(Succeed())
+		org.StagingBaseline = nil
+		org.StagingExtras = map[string][]sync.Rule{"missing-staging-space": org.Baseline}
+		Expect(sync.Reconcile(ctx, cf, []sync.ResolvedOrg{org}, false, io.Discard)).To(MatchError(ContainSubstring(`unknown space "missing-staging-space"`)))
+		Expect(cf.CreateGroupCallCount()).To(Equal(1))
+		Expect(cf.BindStagingCallCount()).To(Equal(1))
+		Expect(cf.BindRunningCallCount()).To(Equal(1))
+		Expect(cf.UnbindStagingCallCount()).To(BeZero())
+		Expect(cf.UnbindRunningCallCount()).To(BeZero())
+		Expect(cf.UpdateGroupDescriptionsCallCount()).To(BeZero())
+		Expect(cf.DeleteGroupCallCount()).To(BeZero())
+	})
+
 	It("backfills descriptions on existing ASGs without changing their grants or bindings", func(ctx SpecContext) {
 		Expect(sync.Reconcile(ctx, cf, []sync.ResolvedOrg{org}, false, io.Discard)).To(Succeed())
 		org.Descriptions = sync.RuleDescriptions{org.Baseline[0]: "a.example.org,b.example.org"}

@@ -343,9 +343,11 @@ func discoverOrg(ctx context.Context, cf Foundation, org ResolvedOrg) (string, [
 		byGUID[s.GUID] = true
 		byName[s.Name] = true
 	}
-	for name := range org.Extras {
-		if !byName[name] {
-			return "", nil, fmt.Errorf("unknown space %q", name)
+	for _, overrides := range []map[string][]Rule{org.Extras, org.StagingExtras} {
+		for _, name := range slices.Sorted(maps.Keys(overrides)) {
+			if !byName[name] {
+				return "", nil, fmt.Errorf("unknown space %q", name)
+			}
 		}
 	}
 	return guid, spaces, nil
