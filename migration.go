@@ -2,6 +2,7 @@ package asgsync
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,83 @@ import (
 
 	"go.yaml.in/yaml/v3"
 )
+
+const migrationCheckpointName = "cdas-migration-baseline"
+
+type checkpointRule struct {
+	Running     bool   `json:"running"`
+	Staging     bool   `json:"staging"`
+	Description string `json:"description,omitempty"`
+}
+
+func migrationBaseline(groups []SecurityGroup, global []SecurityGroup) ([]SecurityGroup, string, error) {
+	var baseline []SecurityGroup
+	var id string
+	for _, g := range groups {
+		if g.Name != migrationCheckpointName {
+			continue
+		}
+		if id != "" || g.GUID == "" || g.Unsupported || g.global() || len(g.Running)+len(g.Staging) > 0 {
+			return nil, "", errors.New("invalid global ASG migration checkpoint")
+		}
+		id = g.GUID
+		baseline = []SecurityGroup{{GUID: id, Name: "original running baseline", GlobalRunning: true, Descriptions: RuleDescriptions{}}, {GUID: id, Name: "original staging baseline", GlobalStaging: true, Descriptions: RuleDescriptions{}}}
+		for _, r := range g.Rules {
+			var state checkpointRule
+			if err := json.Unmarshal([]byte(g.Descriptions[r]), &state); err != nil || (!state.Running && !state.Staging) {
+				return nil, "", errors.New("invalid rule in global ASG migration checkpoint")
+			}
+			for i, include := range []bool{state.Running, state.Staging} {
+				if include {
+					baseline[i].Rules = append(baseline[i].Rules, r)
+					baseline[i].Descriptions[r] = state.Description
+				}
+			}
+		}
+	}
+	if id == "" {
+		return global, "", nil
+	}
+	expected, ok := globalRuleSet(baseline)
+	actual, valid := globalRuleSet(global)
+	if !ok || !valid {
+		return nil, "", errors.New("invalid global ASGs during migration")
+	}
+	for rule := range actual {
+		if !expected[rule] {
+			return nil, "", errors.New("global ASG grants changed since the migration checkpoint was recorded")
+		}
+	}
+	return baseline, id, nil
+}
+
+func createMigrationCheckpoint(ctx context.Context, cf Foundation, groups []SecurityGroup) (string, error) {
+	states := map[Rule]checkpointRule{}
+	for _, g := range groups {
+		for _, r := range g.Rules {
+			s := states[r]
+			s.Running = s.Running || g.GlobalRunning
+			s.Staging = s.Staging || g.GlobalStaging
+			s.Description = mergeDescriptions(s.Description, g.Descriptions[r])
+			states[r] = s
+		}
+	}
+	var rules []Rule
+	descriptions := RuleDescriptions{}
+	for r, s := range states {
+		rules = append(rules, r)
+		data, _ := json.Marshal(s)
+		descriptions[r] = string(data)
+	}
+	id, err := cf.CreateGroup(ctx, migrationCheckpointName, normalize(rules), descriptions)
+	if err != nil {
+		return "", fmt.Errorf("record global ASG migration checkpoint: %w", err)
+	}
+	if id == "" {
+		return "", errors.New("empty global ASG migration checkpoint GUID")
+	}
+	return id, nil
+}
 
 type migrationGrant struct {
 	Destination string   `yaml:"destination"`
@@ -38,14 +116,11 @@ type lifecycleRule struct {
 	lifecycle string
 }
 
-func matchesGlobalDefaults(defaults []Grant, groups []SecurityGroup) bool {
-	if defaults == nil {
-		return false
-	}
-	expected, actual := map[lifecycleRule]bool{}, map[lifecycleRule]bool{}
+func globalRuleSet(groups []SecurityGroup) (map[lifecycleRule]bool, bool) {
+	expected := map[lifecycleRule]bool{}
 	for _, g := range groups {
 		if g.Unsupported || g.GUID == "" || managedGroupName(g.Name) {
-			return false
+			return nil, false
 		}
 		for _, rule := range g.Rules {
 			if g.GlobalRunning {
@@ -56,6 +131,15 @@ func matchesGlobalDefaults(defaults []Grant, groups []SecurityGroup) bool {
 			}
 		}
 	}
+	return expected, true
+}
+
+func matchesGlobalDefaults(defaults []Grant, groups []SecurityGroup) bool {
+	expected, ok := globalRuleSet(groups)
+	if defaults == nil || !ok {
+		return false
+	}
+	actual := map[lifecycleRule]bool{}
 	for _, grant := range defaults {
 		if grant.Hostname != "" {
 			return false
@@ -77,7 +161,7 @@ func matchesGlobalDefaults(defaults []Grant, groups []SecurityGroup) bool {
 	return true
 }
 
-func retireGlobalGroups(ctx context.Context, cf Foundation, groups []SecurityGroup, dryRun bool, out io.Writer) error {
+func retireGlobalGroups(ctx context.Context, cf Foundation, groups []SecurityGroup, checkpoint string, dryRun bool, out io.Writer) error {
 	if !dryRun {
 		current, err := loadGroups(ctx, cf)
 		if err != nil {
@@ -89,6 +173,12 @@ func retireGlobalGroups(ctx context.Context, cf Foundation, groups []SecurityGro
 		})
 		if !unchanged {
 			return errors.New("global ASGs changed during migration; rerun before disabling global bindings")
+		}
+		if checkpoint == "" {
+			checkpoint, err = createMigrationCheckpoint(ctx, cf, groups)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	for _, g := range groups {
@@ -106,6 +196,11 @@ func retireGlobalGroups(ctx context.Context, cf Foundation, groups []SecurityGro
 			if err := cf.DisableGlobalGroup(ctx, g.GUID, g.GlobalRunning, g.GlobalStaging); err != nil {
 				return fmt.Errorf("disable global ASG bindings for %q: %w", g.Name, err)
 			}
+		}
+	}
+	if !dryRun {
+		if err := cf.DeleteGroup(ctx, checkpoint); err != nil {
+			return fmt.Errorf("remove global ASG migration checkpoint: %w", err)
 		}
 	}
 	return nil

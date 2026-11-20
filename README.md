@@ -37,10 +37,10 @@ DNS and staging dependencies.
 With matching defaults, dry-run previews the replacement and cutover. Apply
 reconciles the replacement space bindings first and disables the old global
 bindings only after reconciliation succeeds. The original ASGs and their
-explicit space bindings remain. A failure while disabling multiple global ASGs
-can leave some enabled; the replacement bindings are already in place. Review
-the remaining global groups and the defaults reported on the next run before
-continuing.
+explicit space bindings remain. If disabling multiple global ASGs fails partway
+through, rerun with the original defaults. The temporary, unbound
+`cdas-migration-baseline` ASG records the original grants and is removed after
+the cutover succeeds.
 
 ## Authentication and execution
 

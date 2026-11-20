@@ -77,8 +77,12 @@ func Sync(ctx context.Context, cf Foundation, policy Policy, resolver Resolver, 
 		return err
 	}
 	global := globalGroups(groups)
-	if len(global) > 0 && !matchesGlobalDefaults(policy.Defaults, global) {
-		return reportGlobalGroups(global, out)
+	baseline, checkpoint, err := migrationBaseline(groups, global)
+	if err != nil {
+		return err
+	}
+	if len(baseline) > 0 && !matchesGlobalDefaults(policy.Defaults, baseline) {
+		return reportGlobalGroups(baseline, out)
 	}
 	if policy.Defaults != nil {
 		names, err := cf.ListOrgNames(ctx)
@@ -103,10 +107,10 @@ func Sync(ctx context.Context, cf Foundation, policy Policy, resolver Resolver, 
 	if err := reconcile(ctx, cf, orgs, groups, dryRun, out); err != nil {
 		return err
 	}
-	if len(global) == 0 {
+	if len(global) == 0 && checkpoint == "" {
 		return nil
 	}
-	return retireGlobalGroups(ctx, cf, global, dryRun, out)
+	return retireGlobalGroups(ctx, cf, global, checkpoint, dryRun, out)
 }
 
 func ruleKey(rules []Rule) string {
@@ -120,7 +124,11 @@ func Reconcile(ctx context.Context, cf Foundation, orgs []ResolvedOrg, dryRun bo
 		return err
 	}
 	if global := globalGroups(groups); len(global) > 0 {
-		return reportGlobalGroups(global, out)
+		baseline, _, err := migrationBaseline(groups, global)
+		if err != nil {
+			return err
+		}
+		return reportGlobalGroups(baseline, out)
 	}
 	return reconcile(ctx, cf, orgs, groups, dryRun, out)
 }
@@ -135,6 +143,11 @@ func loadGroups(ctx context.Context, cf Foundation) ([]SecurityGroup, error) {
 
 func reconcile(ctx context.Context, cf Foundation, orgs []ResolvedOrg, groups []SecurityGroup, dryRun bool, out io.Writer) error {
 	var failures []error
+	policies := map[string][]Rule{}
+	bindings := map[string]binding{}
+	provenance := map[string]RuleDescriptions{}
+	legacyOwners := map[string]bool{}
+	orgIDs := map[string]bool{}
 	for _, org := range orgs {
 		if len(org.DNSFailures) > 0 {
 			failures = append(failures, describeDNSFailures(ctx, cf, org, groups))
@@ -143,11 +156,6 @@ func reconcile(ctx context.Context, cf Foundation, orgs []ResolvedOrg, groups []
 		guid, spaces, err := discoverOrg(ctx, cf, org)
 		if err != nil {
 			return errors.Join(errors.Join(failures...), fmt.Errorf("org %q: %w", org.Name, err))
-	policies := map[string][]Rule{}
-	bindings := map[string]binding{}
-	provenance := map[string]RuleDescriptions{}
-	legacyOwners := map[string]bool{}
-	orgIDs := map[string]bool{}
 		}
 		if orgIDs[guid] {
 			return fmt.Errorf("duplicate org GUID %s", guid)
@@ -166,6 +174,10 @@ func reconcile(ctx context.Context, cf Foundation, orgs []ResolvedOrg, groups []
 		}
 	}
 	dnsErr := errors.Join(failures...)
+	actions, err := planFoundation(ctx, groups, policies, bindings, provenance, legacyOwners, dnsErr != nil)
+	if err != nil {
+		return errors.Join(dnsErr, err)
+	}
 	return errors.Join(dnsErr, applyActions(ctx, cf, actions, dryRun, out, dnsErr != nil))
 }
 
@@ -173,10 +185,6 @@ func describeDNSFailures(ctx context.Context, cf Foundation, org ResolvedOrg, gr
 	guid, err := cf.FindOrg(ctx, org.Name)
 	if guid == "" && err == nil {
 		err = errors.New("empty org GUID")
-	}
-	actions, err := planFoundation(ctx, groups, policies, bindings, provenance, legacyOwners, dnsErr != nil)
-	if err != nil {
-		return errors.Join(dnsErr, err)
 	}
 	var spaces []Space
 	if err == nil {

@@ -3,6 +3,7 @@ package asgsync_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -100,7 +101,11 @@ orgs: [{name: payments, allow: [{hostname: payments.example.org, protocol: tcp, 
 			} else {
 				Expect(cf.DisableGlobalGroupCallCount()).To(BeZero())
 			}
-			Expect(cf.DeleteGroupCallCount()).To(BeZero())
+			if wantDisable {
+				Expect(cf.DeleteGroupCallCount()).To(Equal(1))
+			} else {
+				Expect(cf.DeleteGroupCallCount()).To(BeZero())
+			}
 			if dryRun {
 				Expect(cf.CreateGroupCallCount()).To(BeZero())
 			}
@@ -121,5 +126,78 @@ orgs: [{name: payments, allow: [{hostname: missing.example.org, protocol: tcp, p
 		var out strings.Builder
 		Expect(sync.Sync(ctx, cf, policy, &asgsyncfakes.FakeResolver{}, sync.DNSOptions{}, false, &out)).To(MatchError(ContainSubstring("DNS lookup")))
 		Expect(cf.DisableGlobalGroupCallCount()).To(BeZero())
+	})
+
+	It("retries a partial cutover using the full original defaults", func(ctx SpecContext) {
+		cf := &asgsyncfakes.FakeFoundation{}
+		first := sync.Rule{Destination: "192.0.2.0/24", Protocol: "all"}
+		second := sync.Rule{Destination: "198.51.100.0/24", Protocol: "all"}
+		groups := []sync.SecurityGroup{
+			{GUID: "first", Name: "first", GlobalRunning: true, Rules: []sync.Rule{first}},
+			{GUID: "second", Name: "second", GlobalStaging: true, Rules: []sync.Rule{second}},
+		}
+		cf.ListGroupsCalls(func(context.Context) ([]sync.SecurityGroup, error) { return groups, nil })
+		cf.CreateGroupCalls(func(_ context.Context, name string, rules []sync.Rule, descriptions sync.RuleDescriptions) (string, error) {
+			groups = append(groups, sync.SecurityGroup{GUID: name, Name: name, Rules: rules, Descriptions: descriptions})
+			return name, nil
+		})
+		cf.BindRunningCalls(func(_ context.Context, id string, spaces []string) error {
+			for i := range groups {
+				if groups[i].GUID == id {
+					groups[i].Running = spaces
+				}
+			}
+			return nil
+		})
+		cf.BindStagingCalls(func(_ context.Context, id string, spaces []string) error {
+			for i := range groups {
+				if groups[i].GUID == id {
+					groups[i].Staging = spaces
+				}
+			}
+			return nil
+		})
+		fail := true
+		cf.DeleteGroupCalls(func(_ context.Context, id string) error {
+			Expect(groups[0].GlobalRunning || groups[1].GlobalStaging).To(BeFalse())
+			groups = slices.DeleteFunc(groups, func(g sync.SecurityGroup) bool { return g.GUID == id })
+			return nil
+		})
+		cf.DisableGlobalGroupCalls(func(_ context.Context, id string, _, _ bool) error {
+			if id == "second" && fail {
+				return errors.New("temporary failure")
+			}
+			for i := range groups {
+				if groups[i].GUID == id {
+					groups[i].GlobalRunning, groups[i].GlobalStaging = false, false
+				}
+			}
+			return nil
+		})
+		cf.ListOrgNamesReturns([]string{"inherited"}, nil)
+		cf.FindOrgReturns("org-guid", nil)
+		cf.ListSpacesReturns([]sync.Space{{Name: "app", GUID: "space-guid"}}, nil)
+		policy, err := sync.ParsePolicy(strings.NewReader(`defaults:
+  - {destination: 192.0.2.0/24, protocol: all, lifecycles: [running]}
+  - {destination: 198.51.100.0/24, protocol: all, lifecycles: [staging]}
+`))
+		Expect(err).NotTo(HaveOccurred())
+		resolver := &asgsyncfakes.FakeResolver{}
+		var out strings.Builder
+		Expect(sync.Sync(ctx, cf, policy, resolver, sync.DNSOptions{}, false, &out)).To(MatchError(ContainSubstring("temporary failure")))
+		Expect(groups[0].GlobalRunning).To(BeFalse())
+		Expect(groups[1].GlobalStaging).To(BeTrue())
+		Expect(cf.DeleteGroupCallCount()).To(BeZero())
+		reduced, err := sync.ParsePolicy(strings.NewReader(`defaults: [{destination: 198.51.100.0/24, protocol: all, lifecycles: [staging]}]`))
+		Expect(err).NotTo(HaveOccurred())
+		out.Reset()
+		Expect(sync.Sync(ctx, cf, reduced, resolver, sync.DNSOptions{}, false, &out)).NotTo(Succeed())
+		Expect(out.String()).To(ContainSubstring(first.Destination))
+		fail = false
+		Expect(sync.Sync(ctx, cf, policy, resolver, sync.DNSOptions{}, false, &out)).To(Succeed())
+		Expect(groups[1].GlobalStaging).To(BeFalse())
+		Expect(cf.UnbindRunningCallCount()).To(BeZero())
+		Expect(cf.BindRunningCallCount()).To(Equal(1))
+		Expect(cf.BindStagingCallCount()).To(Equal(1))
 	})
 })
