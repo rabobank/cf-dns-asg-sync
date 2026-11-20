@@ -56,11 +56,9 @@ func planFoundation(ctx context.Context, groups []SecurityGroup, policies map[st
 		taken[g.Name] = true
 	}
 	var inventory []snapshotGroup
-	var existing, fixed []Group
-	fixedTargets := map[string][]string{}
+	var existing []Group
 	index := map[string][]snapshotGroup{}
 	seenNames, seenIDs := map[string]bool{}, map[string]bool{}
-	keys := slices.Sorted(maps.Keys(policies))
 	for _, g := range ordered {
 		if !managedGroupName(g.Name) {
 			continue
@@ -89,23 +87,13 @@ func planFoundation(ctx context.Context, groups []SecurityGroup, policies map[st
 		s.Rules = normalize(slices.Clone(g.Rules))
 		inventory = append(inventory, s)
 		if s.protected {
-			if len(s.Rules) == 0 {
-				continue
-			}
-			for _, key := range keys {
-				if containsRules(policies[key], s.Rules) {
-					fixedTargets[s.GUID] = append(fixedTargets[s.GUID], key)
-				}
-			}
-			if targets := fixedTargets[s.GUID]; len(targets) > 0 {
-				fixed = append(fixed, Group{s.Rules, targets})
-			}
 			continue
 		}
 		fingerprint := ruleKey(s.Rules)
 		index[fingerprint] = append(index[fingerprint], s)
 		existing = append(existing, Group{s.Rules, s.active})
 	}
+	fixedTargets, fixed := selectProtectedBindings(inventory, policies)
 	desired, err := minimize(ctx, policies, existing, fixed)
 	if err != nil {
 		return nil, err
@@ -173,9 +161,69 @@ func planFoundation(ctx context.Context, groups []SecurityGroup, policies map[st
 	return actions, nil
 }
 
-func containsRules(want, group []Rule) bool {
+func selectProtectedBindings(inventory []snapshotGroup, policies map[string][]Rule) (map[string][]string, []Group) {
+	var protected []snapshotGroup
+	for _, group := range inventory {
+		if group.protected {
+			protected = append(protected, group)
+		}
+	}
+	targets := map[string][]string{}
+	for _, key := range slices.Sorted(maps.Keys(policies)) {
+		want := map[Rule]bool{}
+		for _, rule := range policies[key] {
+			want[rule] = true
+		}
+		covered := map[Rule]bool{}
+		var candidates []snapshotGroup
+		keep := func(group snapshotGroup) {
+			targets[group.GUID] = append(targets[group.GUID], key)
+			for _, rule := range group.Rules {
+				covered[rule] = true
+			}
+		}
+		for _, group := range protected {
+			if !containsRules(want, group.Rules) {
+				continue
+			}
+			if slices.Contains(group.active, key) {
+				keep(group)
+			} else {
+				candidates = append(candidates, group)
+			}
+		}
+		// Add the greatest missing coverage first. Inventory order breaks ties.
+		for len(covered) < len(want) {
+			best, gain := -1, 0
+			for i, group := range candidates {
+				missing := 0
+				for _, rule := range group.Rules {
+					if !covered[rule] {
+						missing++
+					}
+				}
+				if missing > gain {
+					best, gain = i, missing
+				}
+			}
+			if best < 0 {
+				break
+			}
+			keep(candidates[best])
+		}
+	}
+	var fixed []Group
+	for _, group := range protected {
+		if keys := targets[group.GUID]; len(keys) > 0 && len(group.Rules) > 0 {
+			fixed = append(fixed, Group{group.Rules, keys})
+		}
+	}
+	return targets, fixed
+}
+
+func containsRules(want map[Rule]bool, group []Rule) bool {
 	for _, r := range group {
-		if !slices.Contains(want, r) {
+		if !want[r] {
 			return false
 		}
 	}

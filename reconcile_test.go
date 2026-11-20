@@ -247,6 +247,25 @@ orgs:
 		Expect(cf.DeleteGroupCallCount()).To(BeZero())
 	})
 
+	It("adds only protected bindings that fill gaps after preserving compatible bindings", func(ctx SpecContext) {
+		dns := sync.Rule{Destination: "192.0.2.53", Protocol: "udp", Port: 53}
+		https := org.Baseline[0]
+		org.Baseline = []sync.Rule{dns, https}
+		existing = []sync.SecurityGroup{
+			{GUID: "dns", Name: "cdas-aaaaaaaaaaaaa", Rules: []sync.Rule{dns}, Running: []string{"foreign-space", "dev-guid"}},
+			{GUID: "both", Name: "cdas-bbbbbbbbbbbbb", Rules: []sync.Rule{dns, https}, Running: []string{"foreign-space"}},
+		}
+		Expect(sync.Reconcile(ctx, cf, []sync.ResolvedOrg{org}, false, io.Discard)).To(Succeed())
+		Expect(cf.BindRunningCallCount()).To(Equal(1))
+		_, group, spaces := cf.BindRunningArgsForCall(0)
+		Expect(group).To(Equal("both"))
+		Expect(spaces).To(ConsistOf("dev-guid", "prod-guid"))
+		Expect(cf.CreateGroupCallCount()).To(BeZero())
+		Expect(cf.UnbindRunningCallCount()).To(BeZero())
+		Expect(sync.Reconcile(ctx, cf, []sync.ResolvedOrg{org}, false, io.Discard)).To(Succeed())
+		Expect(cf.BindRunningCallCount()).To(Equal(1))
+	})
+
 	It("previews changes and refuses unknown overrides before making writes", func(ctx SpecContext) {
 		var out strings.Builder
 		Expect(sync.Reconcile(ctx, cf, []sync.ResolvedOrg{org}, true, &out)).To(Succeed())
