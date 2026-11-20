@@ -24,6 +24,26 @@ const policyYAML = `orgs:
 `
 
 var _ = Describe("DNS policy", func() {
+	It("resolves native grants from current fields without relying on YAML parsing", func(ctx SpecContext) {
+		policy := sync.Policy{Orgs: []sync.Org{{Name: "payments", Allow: []sync.Grant{{Destination: "192.0.2.1", Protocol: "all"}}}}}
+		orgs, err := sync.Resolve(ctx, policy, nil, sync.DNSOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(orgs[0].Baseline).To(Equal([]sync.Rule{{Destination: "192.0.2.1", Protocol: "all"}}))
+		Expect(orgs[0].StagingBaseline).To(Equal(orgs[0].Baseline))
+		Expect(policy.Orgs[0].Allow[0].Lifecycles).To(BeNil())
+	})
+
+	It("revalidates edited native grants", func(ctx SpecContext) {
+		policy, err := sync.ParsePolicy(strings.NewReader(`orgs: [{name: payments, allow: [{destination: 192.0.2.1, protocol: all}]}]`))
+		Expect(err).NotTo(HaveOccurred())
+		policy.Orgs[0].Allow[0].Destination = "192.0.2.2"
+		orgs, err := sync.Resolve(ctx, policy, nil, sync.DNSOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(orgs[0].Baseline).To(Equal([]sync.Rule{{Destination: "192.0.2.2", Protocol: "all"}}))
+		policy.Orgs[0].Allow[0].Destination = "invalid"
+		_, err = sync.Resolve(ctx, policy, nil, sync.DNSOptions{})
+		Expect(err).To(MatchError(ContainSubstring("invalid ASG destination")))
+	})
 	var resolver *asgsyncfakes.FakeResolver
 	BeforeEach(func() { resolver = &asgsyncfakes.FakeResolver{} })
 

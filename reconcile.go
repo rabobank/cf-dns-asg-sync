@@ -81,8 +81,11 @@ func Sync(ctx context.Context, cf Foundation, policy Policy, resolver Resolver, 
 	if err != nil {
 		return err
 	}
-	if len(baseline) > 0 && !matchesGlobalDefaults(policy.Defaults, baseline) {
-		return reportGlobalGroups(baseline, out)
+	if len(baseline) > 0 {
+		matches, err := matchesGlobalDefaults(policy.Defaults, baseline)
+		if err != nil || !matches {
+			return errors.Join(err, reportGlobalGroups(baseline, out))
+		}
 	}
 	if policy.Defaults != nil {
 		names, err := cf.ListOrgNames(ctx)

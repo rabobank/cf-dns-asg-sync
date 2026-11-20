@@ -46,7 +46,6 @@ type Grant struct {
 	Log         bool     `yaml:"log"`
 	Description string   `yaml:"description"`
 	Lifecycles  []string `yaml:"lifecycles"`
-	static      []Rule
 }
 
 type DNSOptions struct {
@@ -160,52 +159,54 @@ func checkName(name string, seen map[string]bool) error {
 }
 
 func validateGrants(grants []Grant) error {
-	for i := range grants {
-		g := &grants[i]
-		if g.Lifecycles == nil {
-			g.Lifecycles = []string{"running", "staging"}
-		}
-		seen := map[string]bool{}
-		for _, life := range g.Lifecycles {
-			if (life != "running" && life != "staging") || seen[life] {
-				return fmt.Errorf("invalid or duplicate lifecycle %q", life)
-			}
-			seen[life] = true
-		}
-		if len(g.Lifecycles) == 0 {
-			return fmt.Errorf("lifecycles must not be empty")
-		}
-		if g.Destination != "" {
-			if g.Hostname != "" {
-				return fmt.Errorf("specify hostname or destination, not both")
-			}
-			var err error
-			g.static, err = destinationRules(g.Destination, g.Protocol, g.Ports, g.Type, g.Code, g.Log)
-			if err != nil {
-				return err
-			}
-			continue
-		}
-		h := strings.ToLower(strings.TrimSuffix(g.Hostname, "."))
-		labels := strings.Split(h, ".")
-		_, ipErr := netip.ParseAddr(h)
-		if len(h) > 253 || len(labels) < 2 || ipErr == nil {
-			return fmt.Errorf("expected a fully qualified hostname, got %q", g.Hostname)
-		}
-		for _, label := range labels {
-			if !dnsLabel.MatchString(label) {
-				return fmt.Errorf("invalid hostname %q", g.Hostname)
-			}
-		}
-		g.Hostname = h + "."
-		if g.Protocol != "tcp" && g.Protocol != "udp" {
-			return fmt.Errorf("%s: protocol must be tcp or udp", h)
-		}
-		if len(g.Ports) == 0 || g.Type != nil || g.Code != nil || g.Log || g.Description != "" {
-			return fmt.Errorf("%s: hostname rules require ports and use generated descriptions", h)
+	for _, g := range grants {
+		if _, _, err := deriveGrant(g); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func deriveGrant(g Grant) (Grant, []Rule, error) {
+	if g.Lifecycles == nil {
+		g.Lifecycles = []string{"running", "staging"}
+	}
+	seen := map[string]bool{}
+	for _, life := range g.Lifecycles {
+		if (life != "running" && life != "staging") || seen[life] {
+			return g, nil, fmt.Errorf("invalid or duplicate lifecycle %q", life)
+		}
+		seen[life] = true
+	}
+	if len(g.Lifecycles) == 0 {
+		return g, nil, fmt.Errorf("lifecycles must not be empty")
+	}
+	if g.Destination != "" {
+		if g.Hostname != "" {
+			return g, nil, fmt.Errorf("specify hostname or destination, not both")
+		}
+		rules, err := destinationRules(g.Destination, g.Protocol, g.Ports, g.Type, g.Code, g.Log)
+		return g, rules, err
+	}
+	h := strings.ToLower(strings.TrimSuffix(g.Hostname, "."))
+	labels := strings.Split(h, ".")
+	_, ipErr := netip.ParseAddr(h)
+	if len(h) > 253 || len(labels) < 2 || ipErr == nil {
+		return g, nil, fmt.Errorf("expected a fully qualified hostname, got %q", g.Hostname)
+	}
+	for _, label := range labels {
+		if !dnsLabel.MatchString(label) {
+			return g, nil, fmt.Errorf("invalid hostname %q", g.Hostname)
+		}
+	}
+	g.Hostname = h + "."
+	if g.Protocol != "tcp" && g.Protocol != "udp" {
+		return g, nil, fmt.Errorf("%s: protocol must be tcp or udp", h)
+	}
+	if len(g.Ports) == 0 || g.Type != nil || g.Code != nil || g.Log || g.Description != "" {
+		return g, nil, fmt.Errorf("%s: hostname rules require ports and use generated descriptions", h)
+	}
+	return g, nil, nil
 }
 
 func Resolve(ctx context.Context, policy Policy, resolver Resolver, opts DNSOptions) ([]ResolvedOrg, error) {
@@ -215,8 +216,12 @@ func Resolve(ctx context.Context, policy Policy, resolver Resolver, opts DNSOpti
 	}
 	cache := map[string]lookup{}
 	resolve := func(org *ResolvedOrg, grants []Grant) (running, staging []Rule, err error) {
-		for _, g := range grants {
+		for _, grant := range grants {
 			if err := ctx.Err(); err != nil {
+				return nil, nil, err
+			}
+			g, native, err := deriveGrant(grant)
+			if err != nil {
 				return nil, nil, err
 			}
 			add := func(rule Rule, description string) {
@@ -231,7 +236,7 @@ func Resolve(ctx context.Context, policy Policy, resolver Resolver, opts DNSOpti
 				}
 			}
 			if g.Destination != "" {
-				for _, rule := range g.static {
+				for _, rule := range native {
 					add(rule, g.Description)
 				}
 				continue

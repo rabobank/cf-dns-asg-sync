@@ -13,6 +13,18 @@ import (
 )
 
 var _ = Describe("Global ASG migration", func() {
+	It("compares current programmatic and edited defaults before allowing a cutover", func(ctx SpecContext) {
+		cf := &asgsyncfakes.FakeFoundation{}
+		cf.ListGroupsReturns([]sync.SecurityGroup{{GUID: "global", Name: "public", GlobalRunning: true, GlobalStaging: true, Rules: []sync.Rule{{Destination: "192.0.2.1", Protocol: "all"}}}}, nil)
+		policy := sync.Policy{Defaults: []sync.Grant{{Destination: "192.0.2.1", Protocol: "all"}}}
+		var out strings.Builder
+		Expect(sync.Sync(ctx, cf, policy, nil, sync.DNSOptions{}, true, &out)).To(Succeed())
+		policy, err := sync.ParsePolicy(strings.NewReader(`defaults: [{destination: 192.0.2.1, protocol: all}]`))
+		Expect(err).NotTo(HaveOccurred())
+		policy.Defaults[0].Destination = "192.0.2.2"
+		Expect(sync.Sync(ctx, cf, policy, nil, sync.DNSOptions{}, false, &out)).To(MatchError(ContainSubstring("global ASGs")))
+		Expect(cf.DisableGlobalGroupCallCount()).To(BeZero())
+	})
 	DescribeTable("blocks writes and prints a usable defaults policy",
 		func(ctx SpecContext, dryRun bool) {
 			cf := &asgsyncfakes.FakeFoundation{}

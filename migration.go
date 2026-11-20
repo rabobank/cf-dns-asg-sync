@@ -134,31 +134,35 @@ func globalRuleSet(groups []SecurityGroup) (map[lifecycleRule]bool, bool) {
 	return expected, true
 }
 
-func matchesGlobalDefaults(defaults []Grant, groups []SecurityGroup) bool {
+func matchesGlobalDefaults(defaults []Grant, groups []SecurityGroup) (bool, error) {
 	expected, ok := globalRuleSet(groups)
 	if defaults == nil || !ok {
-		return false
+		return false, nil
 	}
 	actual := map[lifecycleRule]bool{}
-	for _, grant := range defaults {
-		if grant.Hostname != "" {
-			return false
+	for _, input := range defaults {
+		grant, rules, err := deriveGrant(input)
+		if err != nil {
+			return false, fmt.Errorf("defaults: %w", err)
 		}
-		for _, rule := range grant.static {
+		if grant.Hostname != "" {
+			return false, nil
+		}
+		for _, rule := range rules {
 			for _, lifecycle := range grant.Lifecycles {
 				actual[lifecycleRule{rule, lifecycle}] = true
 			}
 		}
 	}
 	if len(expected) != len(actual) {
-		return false
+		return false, nil
 	}
 	for rule := range expected {
 		if !actual[rule] {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 func retireGlobalGroups(ctx context.Context, cf Foundation, groups []SecurityGroup, checkpoint string, dryRun bool, out io.Writer) error {
