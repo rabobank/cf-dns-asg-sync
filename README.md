@@ -106,4 +106,13 @@ The [GitHub Actions test workflow](.github/workflows/test.yml) checks generated
 fakes, vets and builds the code, and runs Ginkgo with the race detector. Each
 test run uploads its JSON report and coverage profile as `ginkgo-report`.
 
+## Release
+
+In GitHub, open **Actions → Release → Run workflow**, select `master`, and enter
+a version such as `v0.1.0`. After the tests pass, GoReleaser publishes archives
+for Linux, macOS, and Windows (amd64 and arm64), plus SHA-256 checksums. If publishing
+fails after tagging, rerun the original workflow to reuse the tag on the same
+commit. GoReleaser resumes the draft release and replaces any assets already
+uploaded to it.
+
 Licensed under [Apache 2.0](LICENSE).
