@@ -102,5 +102,8 @@ IPv4 and public destinations; add flags in `ci/sync.yml` for private or IPv6 use
 
 Run `go generate ./...` after changing an interface with a Counterfeiter fake.
 Run tests with `go run github.com/onsi/ginkgo/v2/ginkgo -r` or `devbox run test`.
+The [GitHub Actions test workflow](.github/workflows/test.yml) checks generated
+fakes, vets and builds the code, and runs Ginkgo with the race detector. Each
+test run uploads its JSON report and coverage profile as `ginkgo-report`.
 
 Licensed under [Apache 2.0](LICENSE).
