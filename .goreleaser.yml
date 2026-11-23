@@ -25,3 +25,5 @@ checksum:
 
 release:
   mode: replace
+  use_existing_draft: true
+  replace_existing_artifacts: true
