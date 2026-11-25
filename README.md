@@ -27,15 +27,15 @@ To keep rules together in an ASG with a predictable name, use a named default:
 defaults:
   - name: dns
     rules:
-      - {destination: 10.253.5.53, protocol: udp, ports: "53"}
-      - {destination: 10.253.5.53, protocol: tcp, ports: "53"}
+      - {destination: 10.253.5.53, protocol: udp, ports: "53", description: "DNS (UDP)"}
+      - {destination: 10.253.5.53, protocol: tcp, ports: "53", description: "DNS (TCP)"}
   - name: build-artifacts
     lifecycles: [staging]
     rules:
       - {hostname: artifacts.example.com, protocol: tcp, ports: [443]}
 ```
 
-This creates `dns` for both lifecycles and `build-artifacts-staging` for staging.
+This creates ASGs for the lifecycles staging (`dns-staging` and `build-artifacts-staging`) and running (`dns-running`).
 An explicit `[running, staging]` creates two suffixed ASGs. Put `lifecycles` on
 the group, rather than its rules. Named groups are not split by the optimizer.
 Flat defaults, including the migration output, remain supported and can be mixed

@@ -1,14 +1,20 @@
 # Copy all existing global rules you intend to preserve. This is a sample,
 # not a complete replacement for the stock public_networks security group.
 defaults:
-  - destination: 10.246.0.53
-    protocol: udp
-    ports: "53"
-  - destination: 10.246.0.53
-    protocol: tcp
-    ports: "53"
-  - destination: 0.0.0.0-9.255.255.255
-    protocol: all
+  - name: global-defaults
+    lifecycles: [running, staging]
+    rules:
+    - destination: 10.246.0.53
+      protocol: udp
+      ports: "53"
+      description: "DNS (UDP)"
+    - destination: 10.246.0.53
+      protocol: tcp
+      ports: "53"
+      description: "DNS (TCP)"
+    - destination: 0.0.0.0-9.255.255.255
+      protocol: all
+      description: "All traffic"
 
 orgs:
   - name: payments
@@ -28,6 +34,7 @@ orgs:
         protocol: tcp
         ports: [443]
         lifecycles: [running]
+        description: "Payment provider API"
 
   - name: reporting
     # Inherits defaults; dev gets an additive running rule.
