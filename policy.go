@@ -37,6 +37,8 @@ type SpacePolicy struct {
 }
 
 type Grant struct {
+	Name        string   `yaml:"name"`
+	Rules       []Grant  `yaml:"rules"`
 	Hostname    string   `yaml:"hostname"`
 	Destination string   `yaml:"destination"`
 	Protocol    string   `yaml:"protocol"`
@@ -64,6 +66,7 @@ type Rule struct {
 }
 
 type ResolvedOrg struct {
+	NamedDefaults   map[string]resolvedDefault
 	Name            string
 	Baseline        []Rule
 	Extras          map[string][]Rule
@@ -121,7 +124,7 @@ func ParsePolicy(r io.Reader) (Policy, error) {
 	if len(policy.Orgs) == 0 && policy.Defaults == nil {
 		return Policy{}, fmt.Errorf("policy must list at least one org or set defaults")
 	}
-	if err := validateGrants(policy.Defaults); err != nil {
+	if _, _, err := splitDefaults(policy.Defaults); err != nil {
 		return Policy{}, fmt.Errorf("defaults: %w", err)
 	}
 	orgNames := map[string]bool{}
@@ -168,6 +171,9 @@ func validateGrants(grants []Grant) error {
 }
 
 func deriveGrant(g Grant) (Grant, []Rule, error) {
+	if g.Name != "" || g.Rules != nil {
+		return g, nil, fmt.Errorf("named groups are only supported in defaults")
+	}
 	if g.Lifecycles == nil {
 		g.Lifecycles = []string{"running", "staging"}
 	}
@@ -210,6 +216,10 @@ func deriveGrant(g Grant) (Grant, []Rule, error) {
 }
 
 func Resolve(ctx context.Context, policy Policy, resolver Resolver, opts DNSOptions) ([]ResolvedOrg, error) {
+	flat, named, err := splitDefaults(policy.Defaults)
+	if err != nil {
+		return nil, fmt.Errorf("defaults: %w", err)
+	}
 	type lookup struct {
 		ips []netip.Addr
 		err error
@@ -290,7 +300,16 @@ func Resolve(ctx context.Context, policy Policy, resolver Resolver, opts DNSOpti
 		org := ResolvedOrg{Name: o.Name, Extras: map[string][]Rule{}, StagingExtras: map[string][]Rule{}, Descriptions: RuleDescriptions{}, DNSFailures: map[string]error{}}
 		grants := o.Allow
 		if grants == nil {
-			grants = policy.Defaults
+			grants = flat
+			org.NamedDefaults = map[string]resolvedDefault{}
+			for _, group := range named {
+				entry := ResolvedOrg{Descriptions: RuleDescriptions{}, DNSFailures: org.DNSFailures}
+				running, staging, err := resolve(&entry, group.rules)
+				if err != nil {
+					return nil, fmt.Errorf("default ASG %q: %w", group.name, err)
+				}
+				org.NamedDefaults[group.name] = resolvedDefault{running, staging, entry.Descriptions}
+			}
 		}
 		base, stage, err := resolve(&org, grants)
 		if err != nil {

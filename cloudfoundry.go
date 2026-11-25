@@ -117,9 +117,6 @@ func (c *cloudFoundry) ListGroups(ctx context.Context) ([]SecurityGroup, error) 
 		}
 		running, staging := g.GloballyEnabled.Running, g.GloballyEnabled.Staging
 		group := SecurityGroup{GUID: g.GUID, Name: g.Name, GlobalRunning: running != nil && *running, GlobalStaging: staging != nil && *staging}
-		if !group.global() && !managedGroupName(g.Name) && g.Name != migrationCheckpointName {
-			continue
-		}
 		group.Unsupported = running == nil || staging == nil || (!group.global() && (g.Relationships.RunningSpaces.Data == nil || g.Relationships.StagingSpaces.Data == nil))
 		for _, s := range g.Relationships.RunningSpaces.Data {
 			group.Running = append(group.Running, s.GUID)

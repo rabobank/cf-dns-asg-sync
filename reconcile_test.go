@@ -41,6 +41,126 @@ var _ = Describe("ASG reconciliation", func() {
 		})
 	})
 
+	It("applies suffixes and binds named defaults only to inheriting orgs", func(ctx SpecContext) {
+		cf.ListOrgNamesReturns([]string{"payments", "optout"}, nil)
+		cf.FindOrgCalls(func(_ context.Context, name string) (string, error) { return name, nil })
+		cf.ListSpacesCalls(func(_ context.Context, id string) ([]sync.Space, error) {
+			return []sync.Space{{Name: "dev", GUID: id + "-space"}}, nil
+		})
+		policy, err := sync.ParsePolicy(strings.NewReader(`defaults:
+  - name: dns
+    rules: [{destination: 192.0.2.53, protocol: udp, ports: "53"}]
+  - name: api
+    lifecycles: [running, staging]
+    rules: [{destination: 192.0.2.1, protocol: tcp, ports: "443"}]
+orgs: [{name: optout, allow: []}]
+`))
+		Expect(err).NotTo(HaveOccurred())
+		cf.BindStagingCalls(func(_ context.Context, id string, ids []string) error {
+			for i := range existing {
+				if existing[i].GUID == id {
+					existing[i].Staging = append(existing[i].Staging, ids...)
+				}
+			}
+			return nil
+		})
+		Expect(sync.Sync(ctx, cf, policy, nil, sync.DNSOptions{}, false, io.Discard)).To(Succeed())
+		Expect(existing).To(HaveLen(3))
+		Expect(existing).To(ContainElements(
+			And(HaveField("Name", "dns"), HaveField("Running", Equal([]string{"payments-space"})), HaveField("Staging", Equal([]string{"payments-space"}))),
+			And(HaveField("Name", "api-running"), HaveField("Running", Equal([]string{"payments-space"})), HaveField("Staging", BeEmpty())),
+			And(HaveField("Name", "api-staging"), HaveField("Running", BeEmpty()), HaveField("Staging", Equal([]string{"payments-space"}))),
+		))
+		Expect(sync.Sync(ctx, cf, policy, nil, sync.DNSOptions{}, false, io.Discard)).To(Succeed())
+		Expect(cf.CreateGroupCallCount()).To(Equal(3))
+		Expect(cf.BindRunningCallCount()).To(Equal(2))
+		Expect(cf.BindStagingCallCount()).To(Equal(2))
+	})
+
+	It("warns about unselected existing ASGs by default", func(ctx SpecContext) {
+		existing = []sync.SecurityGroup{{Name: "old-unused", GUID: "old"}, {Name: "old-bound", GUID: "bound", Running: []string{"dev-guid"}}}
+		var out strings.Builder
+		Expect(sync.Reconcile(ctx, cf, []sync.ResolvedOrg{org}, false, &out)).To(Succeed())
+		Expect(out.String()).To(ContainSubstring(`warning: existing ASG "old-unused"`))
+		Expect(out.String()).To(ContainSubstring(`warning: existing ASG "old-bound"`))
+		Expect(out.String()).To(ContainSubstring("dev-guid"))
+		Expect(cf.DeleteGroupCallCount()).To(BeZero())
+		Expect(cf.UnbindRunningCallCount()).To(BeZero())
+	})
+
+	DescribeTable("prunes unused and unbound ASGs only after replacement binding",
+		func(ctx SpecContext, dryRun bool) {
+			existing = []sync.SecurityGroup{
+				{Name: "old-unused", GUID: "old"},
+				{Name: "old-bound", GUID: "bound", Running: []string{"dev-guid"}},
+				{Name: "shared", GUID: "shared", Staging: []string{"dev-guid", "outside"}},
+			}
+			policy, err := sync.ParsePolicy(strings.NewReader(`orgs: [{name: payments, allow: [{destination: 192.0.2.1, protocol: tcp, ports: "443", lifecycles: [running]}]}]`))
+			Expect(err).NotTo(HaveOccurred())
+			cf.DeleteGroupCalls(func(_ context.Context, id string) error {
+				Expect(cf.BindRunningCallCount()).To(Equal(1))
+				if id == "bound" {
+					Expect(cf.UnbindRunningCallCount()).To(Equal(1))
+				}
+				return nil
+			})
+			var out strings.Builder
+			Expect(sync.SyncWithOptions(ctx, cf, policy, nil, sync.DNSOptions{}, sync.SyncOptions{DryRun: dryRun, PruneExistingASGs: true}, &out)).To(Succeed())
+			Expect(out.String()).To(ContainSubstring("delete ASG old-unused"))
+			Expect(out.String()).NotTo(ContainSubstring("delete ASG shared"))
+			if dryRun {
+				Expect(cf.CreateGroupCallCount()).To(BeZero())
+				Expect(cf.DeleteGroupCallCount()).To(BeZero())
+				Expect(cf.UnbindStagingCallCount()).To(BeZero())
+				return
+			}
+			Expect(cf.DeleteGroupCallCount()).To(Equal(2))
+			Expect(cf.UnbindStagingCallCount()).To(Equal(1))
+			_, id, space := cf.UnbindStagingArgsForCall(0)
+			Expect(id).To(Equal("shared"))
+			Expect(space).To(Equal("dev-guid"))
+		}, Entry("apply", false), Entry("dry run", true),
+	)
+
+	It("reuses a matching global named ASG before disabling its global bindings", func(ctx SpecContext) {
+		existing = []sync.SecurityGroup{{Name: "dns", GUID: "existing-dns", GlobalRunning: true, GlobalStaging: true, Rules: []sync.Rule{{Destination: "192.0.2.53", Protocol: "udp", Port: 53}}}}
+		cf.ListOrgNamesReturns([]string{"payments"}, nil)
+		policy, err := sync.ParsePolicy(strings.NewReader(`defaults: [{name: dns, rules: [{destination: 192.0.2.53, protocol: udp, ports: "53"}]}]`))
+		Expect(err).NotTo(HaveOccurred())
+		cf.DisableGlobalGroupCalls(func(_ context.Context, id string, _, _ bool) error {
+			Expect(id).To(Equal("existing-dns"))
+			Expect(cf.BindRunningCallCount()).To(Equal(1))
+			Expect(cf.BindStagingCallCount()).To(Equal(1))
+			return nil
+		})
+		Expect(sync.SyncWithOptions(ctx, cf, policy, nil, sync.DNSOptions{}, sync.SyncOptions{PruneExistingASGs: true}, io.Discard)).To(Succeed())
+		Expect(cf.DisableGlobalGroupCallCount()).To(Equal(1))
+		Expect(cf.CreateGroupCallCount()).To(Equal(1)) // Only the cutover checkpoint.
+		_, name, _, _ := cf.CreateGroupArgsForCall(0)
+		Expect(name).To(Equal("cdas-migration-baseline"))
+	})
+
+	It("rejects a conflicting named ASG with an out-of-scope binding before writes", func(ctx SpecContext) {
+		existing = []sync.SecurityGroup{{Name: "dns", GUID: "existing-dns", Staging: []string{"outside"}, Rules: []sync.Rule{{Destination: "192.0.2.54", Protocol: "all"}}}}
+		cf.ListOrgNamesReturns([]string{"payments"}, nil)
+		policy, err := sync.ParsePolicy(strings.NewReader(`defaults: [{name: dns, rules: [{destination: 192.0.2.53, protocol: all}]}]`))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sync.SyncWithOptions(ctx, cf, policy, nil, sync.DNSOptions{}, sync.SyncOptions{PruneExistingASGs: true}, io.Discard)).To(MatchError(ContainSubstring(`named ASG "dns" has conflicting rules`)))
+		Expect(cf.CreateGroupCallCount()).To(BeZero())
+		Expect(cf.UpdateGroupDescriptionsCallCount()).To(BeZero())
+		Expect(cf.DeleteGroupCallCount()).To(BeZero())
+	})
+
+	It("does not prune existing ASGs if a replacement fails to bind", func(ctx SpecContext) {
+		existing = []sync.SecurityGroup{{Name: "old-unused", GUID: "old"}, {Name: "old-bound", GUID: "bound", Running: []string{"dev-guid"}}}
+		cf.BindRunningReturns(fmt.Errorf("failed replacement bind"))
+		policy, err := sync.ParsePolicy(strings.NewReader(`orgs: [{name: payments, allow: [{destination: 192.0.2.1, protocol: all}]}]`))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sync.SyncWithOptions(ctx, cf, policy, nil, sync.DNSOptions{}, sync.SyncOptions{PruneExistingASGs: true}, io.Discard)).To(MatchError(ContainSubstring("failed replacement bind")))
+		Expect(cf.DeleteGroupCallCount()).To(BeZero())
+		Expect(cf.UnbindRunningCallCount()).To(BeZero())
+	})
+
 	It("binds one group to all spaces for an org-only entry and picks up new spaces on the next sync", func(ctx SpecContext) {
 		existing = append(existing, sync.SecurityGroup{GUID: "foreign", Name: "cf-dns-asg-sync-reporting-guid-other", Running: []string{"foreign-space"}})
 		Expect(sync.Reconcile(ctx, cf, []sync.ResolvedOrg{org}, false, io.Discard)).To(Succeed())

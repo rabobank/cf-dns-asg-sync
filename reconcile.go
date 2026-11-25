@@ -72,6 +72,15 @@ func currentBindings(g SecurityGroup) []string {
 // Sync discovers defaulted orgs only when explicitly opted in, then resolves
 // and reconciles the complete policy.
 func Sync(ctx context.Context, cf Foundation, policy Policy, resolver Resolver, opts DNSOptions, dryRun bool, out io.Writer) error {
+	return SyncWithOptions(ctx, cf, policy, resolver, opts, SyncOptions{DryRun: dryRun}, out)
+}
+
+type SyncOptions struct {
+	DryRun            bool
+	PruneExistingASGs bool
+}
+
+func SyncWithOptions(ctx context.Context, cf Foundation, policy Policy, resolver Resolver, opts DNSOptions, options SyncOptions, out io.Writer) error {
 	groups, err := loadGroups(ctx, cf)
 	if err != nil {
 		return err
@@ -107,13 +116,17 @@ func Sync(ctx context.Context, cf Foundation, policy Policy, resolver Resolver, 
 	if err != nil {
 		return err
 	}
-	if err := reconcile(ctx, cf, orgs, groups, dryRun, out); err != nil {
+	_, named, err := splitDefaults(policy.Defaults)
+	if err != nil {
+		return err
+	}
+	if err := reconcile(ctx, cf, orgs, groups, named, options, out); err != nil {
 		return err
 	}
 	if len(global) == 0 && checkpoint == "" {
 		return nil
 	}
-	return retireGlobalGroups(ctx, cf, global, checkpoint, dryRun, out)
+	return retireGlobalGroups(ctx, cf, global, checkpoint, options.DryRun, out)
 }
 
 func ruleKey(rules []Rule) string {
@@ -133,7 +146,7 @@ func Reconcile(ctx context.Context, cf Foundation, orgs []ResolvedOrg, dryRun bo
 		}
 		return reportGlobalGroups(baseline, out)
 	}
-	return reconcile(ctx, cf, orgs, groups, dryRun, out)
+	return reconcile(ctx, cf, orgs, groups, nil, SyncOptions{DryRun: dryRun}, out)
 }
 
 func loadGroups(ctx context.Context, cf Foundation) ([]SecurityGroup, error) {
@@ -144,13 +157,17 @@ func loadGroups(ctx context.Context, cf Foundation) ([]SecurityGroup, error) {
 	return groups, nil
 }
 
-func reconcile(ctx context.Context, cf Foundation, orgs []ResolvedOrg, groups []SecurityGroup, dryRun bool, out io.Writer) error {
+func reconcile(ctx context.Context, cf Foundation, orgs []ResolvedOrg, groups []SecurityGroup, named []namedDefault, options SyncOptions, out io.Writer) error {
 	var failures []error
 	policies := map[string][]Rule{}
 	bindings := map[string]binding{}
 	provenance := map[string]RuleDescriptions{}
 	legacyOwners := map[string]bool{}
 	orgIDs := map[string]bool{}
+	namedTargets := map[string]*namedTarget{}
+	for _, g := range named {
+		namedTargets[g.name] = nil
+	}
 	for _, org := range orgs {
 		if len(org.DNSFailures) > 0 {
 			failures = append(failures, describeDNSFailures(ctx, cf, org, groups))
@@ -174,14 +191,61 @@ func reconcile(ctx context.Context, cf Foundation, orgs []ResolvedOrg, groups []
 			bindings[running.key()], bindings[staging.key()] = running, staging
 			policies[running.key()] = org.RulesFor(s.Name)
 			policies[staging.key()] = normalize(append(slices.Clone(org.StagingBaseline), org.StagingExtras[s.Name]...))
+			for name, g := range org.NamedDefaults {
+				want := namedTargets[name]
+				if want == nil {
+					want = &namedTarget{rules: normalize(append(slices.Clone(g.running), g.staging...)), descriptions: RuleDescriptions{}}
+					namedTargets[name] = want
+				}
+				for _, p := range []struct {
+					key   string
+					rules []Rule
+				}{{running.key(), g.running}, {staging.key(), g.staging}} {
+					if len(p.rules) == 0 {
+						continue
+					}
+					want.keys = append(want.keys, p.key)
+					for _, rule := range p.rules {
+						want.descriptions[rule] = mergeDescriptions(want.descriptions[rule], mergeDescriptions(g.descriptions[rule], org.Descriptions[rule]))
+					}
+					policies[p.key] = normalize(append(policies[p.key], p.rules...))
+				}
+			}
 		}
 	}
 	dnsErr := errors.Join(failures...)
-	actions, err := planFoundation(ctx, groups, policies, bindings, provenance, legacyOwners, dnsErr != nil)
+	var fixed []Group
+	for _, name := range slices.Sorted(maps.Keys(namedTargets)) {
+		if want := namedTargets[name]; want != nil {
+			fixed = append(fixed, Group{Rules: want.rules, Spaces: sortedUnique(want.keys)})
+		}
+	}
+	actions, err := planFoundation(ctx, groups, policies, bindings, provenance, legacyOwners, fixed, dnsErr != nil)
 	if err != nil {
 		return errors.Join(dnsErr, err)
 	}
-	return errors.Join(dnsErr, applyActions(ctx, cf, actions, dryRun, out, dnsErr != nil))
+	namedActions, err := planNamed(groups, namedTargets, bindings)
+	if err != nil {
+		return errors.Join(dnsErr, err)
+	}
+	for _, a := range namedActions {
+		if !a.update {
+			continue
+		}
+		for _, b := range a.bind {
+			// The old rules stay in place until the replacement binds succeed.
+			// Don't expose a newly bound space to those rules unless it allows them.
+			if slices.ContainsFunc(a.current.Rules, func(r Rule) bool { return !slices.Contains(policies[b.key()], r) }) {
+				return errors.Join(dnsErr, fmt.Errorf("named ASG %q: apply rule removals before adding binding for %s/%s (%s)", a.name, b.org, b.Name, b.lifecycle))
+			}
+		}
+	}
+	cleanup, err := planCleanup(groups, namedTargets, bindings, options.PruneExistingASGs, dnsErr != nil, out)
+	if err != nil {
+		return errors.Join(dnsErr, err)
+	}
+	actions = append(append(namedActions, actions...), cleanup...)
+	return errors.Join(dnsErr, applyActions(ctx, cf, actions, options.DryRun, out, dnsErr != nil))
 }
 
 func describeDNSFailures(ctx context.Context, cf Foundation, org ResolvedOrg, groups []SecurityGroup) error {
@@ -203,7 +267,8 @@ func describeDNSFailures(ctx context.Context, cf Foundation, org ResolvedOrg, gr
 		diagnostics = append(diagnostics, fmt.Errorf("org %q: could not read DNS history: %w", org.Name, err))
 	} else {
 		for _, g := range groups {
-			if !managedGroupName(g.Name) || !validManagedRules(g) || g.global() || g.Unsupported || !(slices.ContainsFunc(g.Running, func(id string) bool { return inOrg[id] }) || slices.ContainsFunc(g.Staging, func(id string) bool { return inOrg[id] })) {
+			_, named := org.NamedDefaults[g.Name]
+			if (!named && !managedGroupName(g.Name)) || !validManagedRules(g) || g.global() || g.Unsupported || !(slices.ContainsFunc(g.Running, func(id string) bool { return inOrg[id] }) || slices.ContainsFunc(g.Staging, func(id string) bool { return inOrg[id] })) {
 				continue
 			}
 			for _, rule := range g.Rules {
@@ -236,7 +301,7 @@ func applyActions(ctx context.Context, cf Foundation, actions []targetGroup, dry
 	}
 	for _, a := range actions {
 		if a.update {
-			if _, err := fmt.Fprintf(out, "update DNS descriptions for ASG %s\n", a.name); err != nil {
+			if _, err := fmt.Fprintf(out, "update rules for ASG %s\n", a.name); err != nil {
 				return err
 			}
 		}
@@ -248,6 +313,8 @@ func applyActions(ctx context.Context, cf Foundation, actions []targetGroup, dry
 			if _, err := fmt.Fprintf(out, "%s ASG %s (%d grants)\n", verb, a.name, len(a.rules)); err != nil {
 				return err
 			}
+		}
+		if a.current.GUID == "" || a.retire || a.update {
 			for _, rule := range a.rules {
 				if _, err := fmt.Fprintf(out, "  %s %s\n", rule.Protocol, rule.displayDestination()); err != nil {
 					return err
@@ -270,6 +337,7 @@ func applyActions(ctx context.Context, cf Foundation, actions []targetGroup, dry
 	}
 	// Publish coverage before removing it. An ambiguous create aborts this run;
 	// the next run reads a fresh snapshot, including any unbound ASGs.
+	finalize := make([]targetGroup, 0)
 	for _, a := range actions {
 		id := a.current.GUID
 		if id == "" {
@@ -283,8 +351,23 @@ func applyActions(ctx context.Context, cf Foundation, actions []targetGroup, dry
 			}
 		}
 		if a.update {
-			if err := cf.UpdateGroupDescriptions(ctx, id, a.rules, a.descriptions); err != nil {
-				return fmt.Errorf("update descriptions for %s: %w", a.name, err)
+			rules := normalize(append(slices.Clone(a.rules), a.current.Rules...))
+			descriptions := a.descriptions
+			if len(rules) > len(a.rules) {
+				finalize = append(finalize, a)
+				if len(rules) == len(normalize(slices.Clone(a.current.Rules))) {
+					// This update only removes rules; wait until replacement binds succeed.
+					rules = nil
+				} else {
+					descriptions = make(RuleDescriptions, len(a.descriptions)+len(a.current.Descriptions))
+					maps.Copy(descriptions, a.current.Descriptions)
+					maps.Copy(descriptions, a.descriptions)
+				}
+			}
+			if rules != nil {
+				if err := cf.UpdateGroupDescriptions(ctx, id, rules, descriptions); err != nil {
+					return fmt.Errorf("update rules for %s: %w", a.name, err)
+				}
 			}
 		}
 		for _, lifecycle := range []string{"running", "staging"} {
@@ -304,6 +387,11 @@ func applyActions(ctx context.Context, cf Foundation, actions []targetGroup, dry
 			if err := bind(ctx, id, ids); err != nil {
 				return fmt.Errorf("bind %s (%s): %w", a.name, lifecycle, err)
 			}
+		}
+	}
+	for _, a := range finalize {
+		if err := cf.UpdateGroupDescriptions(ctx, a.current.GUID, a.rules, a.descriptions); err != nil {
+			return fmt.Errorf("remove obsolete rules from %s: %w", a.name, err)
 		}
 	}
 	for _, a := range actions {

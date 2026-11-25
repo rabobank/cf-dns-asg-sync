@@ -48,7 +48,7 @@ type snapshotGroup struct {
 	protected bool
 }
 
-func planFoundation(ctx context.Context, groups []SecurityGroup, policies map[string][]Rule, bindings map[string]binding, provenance map[string]RuleDescriptions, owners map[string]bool, dnsFailed bool) ([]targetGroup, error) {
+func planFoundation(ctx context.Context, groups []SecurityGroup, policies map[string][]Rule, bindings map[string]binding, provenance map[string]RuleDescriptions, owners map[string]bool, namedCoverage []Group, dnsFailed bool) ([]targetGroup, error) {
 	ordered := slices.Clone(groups)
 	slices.SortFunc(ordered, func(a, b SecurityGroup) int { return strings.Compare(a.Name, b.Name) })
 	taken := map[string]bool{}
@@ -94,7 +94,7 @@ func planFoundation(ctx context.Context, groups []SecurityGroup, policies map[st
 		existing = append(existing, Group{s.Rules, s.active})
 	}
 	fixedTargets, fixed := selectProtectedBindings(inventory, policies)
-	desired, err := minimize(ctx, policies, existing, fixed)
+	desired, err := minimize(ctx, policies, existing, append(namedCoverage, fixed...))
 	if err != nil {
 		return nil, err
 	}
