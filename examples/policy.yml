@@ -4,15 +4,18 @@ orgs:
       - hostname: api.payment-provider.example.com
         protocol: tcp
         ports: [443]
+        description: "Payment provider API"
     spaces:
       - name: dev
         allow:
           - hostname: sandbox.payment-provider.example.com
             protocol: tcp
             ports: [443, 8443]
+            description: "Sandbox Payment provider API"
 
   - name: reporting
     allow:
       - hostname: exports.analytics-provider.example.com
         protocol: tcp
         ports: [443]
+        description: "Analytics provider API"
