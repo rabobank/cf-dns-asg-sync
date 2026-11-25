@@ -140,7 +140,14 @@ func matchesGlobalDefaults(defaults []Grant, groups []SecurityGroup) (bool, erro
 		return false, nil
 	}
 	actual := map[lifecycleRule]bool{}
-	for _, input := range defaults {
+	flat, named, err := splitDefaults(defaults)
+	if err != nil {
+		return false, fmt.Errorf("defaults: %w", err)
+	}
+	for _, group := range named {
+		flat = append(flat, group.rules...)
+	}
+	for _, input := range flat {
 		grant, rules, err := deriveGrant(input)
 		if err != nil {
 			return false, fmt.Errorf("defaults: %w", err)

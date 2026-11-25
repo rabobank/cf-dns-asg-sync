@@ -118,6 +118,10 @@ var _ = Describe("DNS policy", func() {
 		Entry("negative port", "orgs: [{name: payments, allow: [{destination: 192.0.2.1, protocol: tcp, ports: '-1'}]}]"),
 		Entry("empty lifecycles", "defaults: [{destination: 192.0.2.1, protocol: all, lifecycles: []}]"),
 		Entry("unknown lifecycle", "defaults: [{destination: 192.0.2.1, protocol: all, lifecycles: [build]}]"),
+		Entry("named default suffix collision", `defaults:
+  - {name: dns, lifecycles: [staging], rules: [{destination: 192.0.2.53, protocol: all}]}
+  - {name: dns-staging, rules: [{destination: 192.0.2.53, protocol: all}]}`),
+		Entry("rule-level lifecycle in a named default", `defaults: [{name: dns, rules: [{destination: 192.0.2.53, protocol: all, lifecycles: [running]}]}]`),
 	)
 
 	It("resolves native Cloud Foundry rules without a DNS lookup", func(ctx SpecContext) {

@@ -21,6 +21,27 @@ replaces defaults for both lifecycles. `allow: []` opts out of the default
 baseline; any space overrides still apply. Without `defaults`, unlisted orgs
 are untouched.
 
+To keep rules together in an ASG with a predictable name, use a named default:
+
+```yaml
+defaults:
+  - name: dns
+    rules:
+      - {destination: 10.253.5.53, protocol: udp, ports: "53"}
+      - {destination: 10.253.5.53, protocol: tcp, ports: "53"}
+  - name: build-artifacts
+    lifecycles: [staging]
+    rules:
+      - {hostname: artifacts.example.com, protocol: tcp, ports: [443]}
+```
+
+This creates `dns` for both lifecycles and `build-artifacts-staging` for staging.
+An explicit `[running, staging]` creates two suffixed ASGs. Put `lifecycles` on
+the group, rather than its rules. Named groups are not split by the optimizer.
+Flat defaults, including the migration output, remain supported and can be mixed
+with named groups. During migration, an existing global group with the same
+name and rules can be bound in place before its global flags are disabled.
+
 Rules accept either `hostname` or `destination`. Native destinations support
 IPs, CIDRs, ranges, and comma-separated lists (expanded into separate
 destinations). TCP and UDP accept a port, a comma-separated port string, a port
@@ -83,6 +104,13 @@ destinations. Loopback and link-local addresses are never permitted.
   for disabling global bindings during a matching-defaults migration.
 - The sync adds replacement coverage before revoking old coverage. Changes are
   not atomic: a failed run can leave old grants until a later run completes.
+- Existing ASGs outside the policy and the optimizer's managed groups are
+  reported by name and binding. Use `--dry-run --prune-existing-asgs` to preview
+  removing their bindings in healthy managed spaces and deleting groups with
+  no remaining bindings, including groups that were already unbound. The flag
+  preserves bindings outside that scope and skips unbound cleanup during DNS
+  failures. Global groups are handled by the migration; after cutover, a later
+  prune run can remove the former global groups if they are no longer used.
 - New spaces inherit the org policy on the next successful run. Already-running
   containers need Dynamic ASGs or a restart for changes to take effect.
 - ASGs allow IPs and ports, not hostnames. DNS rotation, split-horizon answers,

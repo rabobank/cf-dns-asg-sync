@@ -30,6 +30,7 @@ func run(ctx context.Context, args []string, out, stderr io.Writer) error {
 	flags.SetOutput(stderr)
 	path := flags.String("config", "", "path to the YAML policy (required)")
 	dryRun := flags.Bool("dry-run", false, "show planned ASG changes without applying them")
+	prune := flags.Bool("prune-existing-asgs", false, "remove unused existing ASG bindings in managed spaces and delete unbound groups")
 	credentials := flags.Bool("client-credentials", false, "use CF_USERNAME and CF_PASSWORD as a UAA client ID and secret")
 	ipv6 := flags.Bool("ipv6", false, "resolve AAAA records as well as A records")
 	timeout := flags.Duration("timeout", 3*time.Minute, "overall reconciliation timeout")
@@ -67,5 +68,5 @@ func run(ctx context.Context, args []string, out, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return sync.Sync(ctx, cf, policy, resolver, sync.DNSOptions{IPv6: *ipv6, PrivateCIDRs: private}, *dryRun, out)
+	return sync.SyncWithOptions(ctx, cf, policy, resolver, sync.DNSOptions{IPv6: *ipv6, PrivateCIDRs: private}, sync.SyncOptions{DryRun: *dryRun, PruneExistingASGs: *prune}, out)
 }
