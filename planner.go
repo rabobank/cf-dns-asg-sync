@@ -108,6 +108,14 @@ func minimize(ctx context.Context, policies map[string][]Rule, existing, fixed [
 	if len(intersections)+len(existing) > maxCandidateChecks/max(1, edgeCount) {
 		return nil, fmt.Errorf("ASG minimization exceeded coverage budget")
 	}
+	covered := new(big.Int)
+	for _, g := range fixed {
+		for _, s := range g.Spaces {
+			for _, r := range g.Rules {
+				covered.SetBit(covered, edges[spaceIDs[s]][ids[r]], 1)
+			}
+		}
+	}
 	var candidates []candidate
 	current := map[string][]string{}
 	for _, g := range existing {
@@ -128,14 +136,27 @@ func minimize(ctx context.Context, policies map[string][]Rule, existing, fixed [
 		}
 		return cost - 1
 	}
-	cover := func(group Group, cost int) {
+	cover := func(group Group) {
 		mask := new(big.Int)
+		var needed []string
 		for _, s := range group.Spaces {
+			addsCoverage := false
 			for _, r := range group.Rules {
-				mask.SetBit(mask, edges[spaceIDs[s]][ids[r]], 1)
+				edge := edges[spaceIDs[s]][ids[r]]
+				if covered.Bit(edge) == 0 {
+					addsCoverage = true
+					mask.SetBit(mask, edge, 1)
+				}
+			}
+			// A candidate can still share this space if it fills any gap.
+			if addsCoverage {
+				needed = append(needed, s)
 			}
 		}
-		candidates = append(candidates, candidate{group, mask, cost})
+		if len(needed) != 0 {
+			group.Spaces = needed
+			candidates = append(candidates, candidate{group, mask, bindingCost(group)})
+		}
 	}
 	for _, set := range intersections {
 		var group Group
@@ -147,7 +168,7 @@ func minimize(ctx context.Context, policies map[string][]Rule, existing, fixed [
 				group.Spaces = append(group.Spaces, spaces[i])
 			}
 		}
-		cover(group, bindingCost(group))
+		cover(group)
 	}
 	for _, g := range existing {
 		if len(g.Rules) == 0 || len(g.Spaces) == 0 {
@@ -172,15 +193,7 @@ func minimize(ctx context.Context, policies map[string][]Rule, existing, fixed [
 			}
 		}
 		if valid {
-			cover(g, bindingCost(g))
-		}
-	}
-	covered := new(big.Int)
-	for _, g := range fixed {
-		for _, s := range g.Spaces {
-			for _, r := range g.Rules {
-				covered.SetBit(covered, edges[spaceIDs[s]][ids[r]], 1)
-			}
+			cover(g)
 		}
 	}
 	return minimumCover(ctx, candidates, edgeCount, covered)

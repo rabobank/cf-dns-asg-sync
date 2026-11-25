@@ -38,6 +38,9 @@ defaults:
 This creates ASGs for the lifecycles staging (`dns-staging` and `build-artifacts-staging`) and running (`dns-running`).
 An explicit `[running, staging]` creates two suffixed ASGs. Put `lifecycles` on
 the group, rather than its rules. Named groups are not split by the optimizer.
+For each space and lifecycle, the optimizer skips a generated binding if named
+or protected groups already cover all its rules. It can still share a generated
+ASG across orgs when it adds needed access in each bound space.
 Flat defaults, including the migration output, remain supported and can be mixed
 with named groups. During migration, an existing global group with the same
 name and rules can be bound in place before its global flags are disabled.
