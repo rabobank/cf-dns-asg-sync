@@ -106,6 +106,47 @@ var _ = Describe("Named default coverage", func() {
 		resolver.LookupNetIPReturns(nil, nil)
 		Expect(run(ctx, cf, resolver, text)).To(MatchError(ContainSubstring("1 previously applied IPs: 192.0.2.1")))
 	})
+	It("does not bind a generated group where named defaults already cover its rules", func(ctx SpecContext) {
+		Expect(run(ctx, cf, resolver, `defaults:
+  - name: base
+    lifecycles: [running]
+    rules:
+      - {destination: 192.0.2.1, protocol: tcp, ports: [443]}
+      - {destination: 192.0.2.2, protocol: tcp, ports: [443]}
+orgs:
+  - name: explicit
+    allow:
+      - {destination: 192.0.2.1, protocol: tcp, ports: [443], lifecycles: [running]}
+`)).To(Succeed())
+		Expect(cf.CreateGroupCallCount()).To(Equal(2))
+		idToSpaces := map[string][]string{}
+		for i := 0; i < cf.BindRunningCallCount(); i++ {
+			_, id, spaces := cf.BindRunningArgsForCall(i)
+			idToSpaces[id] = spaces
+		}
+		_, generated, rules, _ := cf.CreateGroupArgsForCall(1)
+		Expect(rules).To(Equal([]sync.Rule{a}))
+		Expect(idToSpaces).To(Equal(map[string][]string{"base-running": {"inherited-space"}, generated: {"explicit-space"}}))
+
+		cf.ListGroupsReturns([]sync.SecurityGroup{
+			{GUID: "named", Name: "base-running", Rules: []sync.Rule{a, b}, Running: []string{"inherited-space"}},
+			{GUID: "generated", Name: generated, Rules: rules, Running: []string{"explicit-space", "inherited-space"}},
+		}, nil)
+		Expect(run(ctx, cf, resolver, `defaults:
+  - name: base
+    lifecycles: [running]
+    rules:
+      - {destination: 192.0.2.1, protocol: tcp, ports: [443]}
+      - {destination: 192.0.2.2, protocol: tcp, ports: [443]}
+orgs: [{name: explicit, allow: [{destination: 192.0.2.1, protocol: tcp, ports: [443], lifecycles: [running]}]}]
+`)).To(Succeed())
+		Expect(cf.UnbindRunningCallCount()).To(Equal(1))
+		_, groupID, spaceID := cf.UnbindRunningArgsForCall(0)
+		Expect(groupID).To(Equal("generated"))
+		Expect(spaceID).To(Equal("inherited-space"))
+		Expect(cf.DeleteGroupCallCount()).To(BeZero())
+	})
+
 	It("shares a superset group across inheriting and explicit orgs", func(ctx SpecContext) {
 		Expect(run(ctx, cf, resolver, namedA+`  - {destination: 192.0.2.2, protocol: tcp, ports: [443], lifecycles: [running]}
 orgs:
