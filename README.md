@@ -27,8 +27,8 @@ To keep rules together in an ASG with a predictable name, use a named default:
 defaults:
   - name: dns
     rules:
-      - {destination: 10.253.5.53, protocol: udp, ports: "53",description: "DNS (UDP)"}
-      - {destination: 10.253.5.53, protocol: tcp, ports: "53",description: "DNS (TCP)"}
+      - {destination: 10.253.5.53, protocol: udp, ports: "53", description: "DNS (UDP)"}
+      - {destination: 10.253.5.53, protocol: tcp, ports: "53", description: "DNS (TCP)"}
   - name: build-artifacts
     lifecycles: [staging]
     rules:
